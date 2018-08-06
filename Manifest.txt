@@ -1,0 +1,6 @@
+CHANGELOG.md
+Manifest.txt
+README.md
+Rakefile
+lib/allocation_sampler.rb
+test/test_allocation_sampler.rb
