@@ -2,5 +2,7 @@ CHANGELOG.md
 Manifest.txt
 README.md
 Rakefile
+ext/allocation_sampler/allocation_sampler.c
+ext/allocation_sampler/extconf.rb
 lib/allocation_sampler.rb
 test/test_allocation_sampler.rb
