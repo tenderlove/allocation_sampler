@@ -101,6 +101,7 @@ newobj(VALUE tpval, void *ptr)
 
 			filename = xmalloc(RSTRING_LEN(path) + 1);
 			strncpy(filename, RSTRING_PTR(path), RSTRING_LEN(path));
+			filename[RSTRING_LEN(path)] = 0;
 			st_insert(stats->allocations, uc, (st_data_t)file_table);
 			st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
 			st_insert(line_table, fline, (unsigned long)1);
@@ -109,6 +110,7 @@ newobj(VALUE tpval, void *ptr)
 			    line_table = st_init_numtable();
 			    filename = xmalloc(RSTRING_LEN(path) + 1);
 			    strncpy(filename, RSTRING_PTR(path), RSTRING_LEN(path));
+			    filename[RSTRING_LEN(path)] = 0;
 			    st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
 			    st_insert(line_table, fline, (unsigned long)1);
 			} else {
@@ -264,6 +266,14 @@ allocation_count(VALUE self)
     return INT2NUM(stats->allocation_count);
 }
 
+static VALUE
+location_p(VALUE self)
+{
+    trace_stats_t * stats;
+    TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
+    return stats->location ? Qtrue : Qfalse;
+}
+
 void
 Init_allocation_sampler(void)
 {
@@ -275,5 +285,6 @@ Init_allocation_sampler(void)
     rb_define_method(rb_cAllocationSampler, "disable", disable, 0);
     rb_define_method(rb_cAllocationSampler, "result", result, 0);
     rb_define_method(rb_cAllocationSampler, "interval", interval, 0);
+    rb_define_method(rb_cAllocationSampler, "location?", location_p, 0);
     rb_define_method(rb_cAllocationSampler, "allocation_count", allocation_count, 0);
 }
