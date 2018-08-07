@@ -48,6 +48,7 @@ class TestAllocationSampler < Minitest::Test
     as.disable
 
     assert_equal({"Object"=>{"test/test_allocation_sampler.rb"=>{46=>1, 47=>1}}}, as.result)
+    assert_equal 11, as.allocation_count
   end
 
   def test_interval_default
