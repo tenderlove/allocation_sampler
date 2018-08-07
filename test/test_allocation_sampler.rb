@@ -24,6 +24,6 @@ class TestAllocationSampler < Minitest::Test
     assert_equal({Object => 2}, as.result)
 
     # Make sure we're aggregating types
-    #assert_equal(1, as.record_count)
+    assert_equal(1, as.record_count)
   end
 end
