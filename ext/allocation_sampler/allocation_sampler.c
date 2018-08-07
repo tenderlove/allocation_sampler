@@ -64,7 +64,6 @@ newobj(VALUE tpval, void *ptr)
 
     alloc_info_t * info = stats->alloc_list + stats->alloc_next_free;
     info->klass = uc;
-    printf("%p %p %p uc: %p size: %d\n", stats->alloc_list, stats->alloc_list + 1, info, info->klass, sizeof(alloc_info_t));
     stats->alloc_next_free++;
 }
 
@@ -75,7 +74,7 @@ allocate(VALUE klass)
     stats = xmalloc(sizeof(trace_stats_t));
     stats->alloc_capa = 1000;
     stats->alloc_next_free = 0;
-    stats->alloc_list = xmalloc(sizeof(alloc_info_t) * stats->alloc_capa);
+    stats->alloc_list = xcalloc(stats->alloc_capal, sizeof(alloc_info_t));
     stats->newobj_hook = rb_tracepoint_new(0, RUBY_INTERNAL_EVENT_NEWOBJ, newobj, stats);
 
     return TypedData_Wrap_Struct(klass, &trace_stats_type, stats);
@@ -106,7 +105,7 @@ insert_to_ruby_hash(st_data_t key, st_data_t value, void *data)
 {
     VALUE rb_hash = (VALUE)data;
     rb_p(key);
-    rb_hash_aset(rb_hash, (VALUE)key, INT2NUM((int)value));
+    rb_hash_aset(rb_hash, (VALUE)key, ULL2NUM((unsigned long)value));
     return ST_CONTINUE;
 }
 
@@ -124,13 +123,12 @@ result(VALUE self)
 
     alloc_info_t * info = stats->alloc_list;
     for(i = 0; i < stats->alloc_next_free; i++, info++) {
-	int count;
-	printf("examining info %p\n", info);
+	/* Count needs to be wide enough so `st_lookup` doesn't clobber `info` */
+	unsigned long count;
 	if(!st_lookup(aggregate, info->klass, &count)) {
 	    count = 0;
 	}
 	count++;
-	printf("inserting %p %d\n", info->klass, count);
 	st_insert(aggregate, info->klass, count);
     }
     st_foreach(aggregate, insert_to_ruby_hash, result);
