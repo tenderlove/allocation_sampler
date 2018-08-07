@@ -1,18 +1,23 @@
 # allocation_sampler
 
-* FIX (url)
+* https://github.com/tenderlove/allocation_sampler
 
 ## DESCRIPTION:
 
-FIX (describe your package)
-
-## FEATURES/PROBLEMS:
-
-* FIX (list of features or problems)
+A sampling allocation profiler.  This keeps track of allocations, but only on
+specified intervals.  Useful for profiling allocations in programs where there
+is a time limit on completion of the program.
 
 ## SYNOPSIS:
 
-  FIX (code sample of usage)
+```ruby
+as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
+as.enable
+10.times { Object.new }
+as.disable
+
+as.result # => {"Object"=>{"<compiled>"=>{1=>10}}}
+```
 
 ## REQUIREMENTS:
 
