@@ -231,12 +231,11 @@ initialize(int argc, VALUE *argv, VALUE self)
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
     rb_scan_args(argc, argv, ":", &opts);
     if (!NIL_P(opts)) {
-	ID ids[3];
-	VALUE args[3];
+	ID ids[2];
+	VALUE args[2];
 	ids[0] = rb_intern("interval");
 	ids[1] = rb_intern("location");
-	ids[2] = rb_intern("stack");
-	rb_get_kwargs(opts, ids, 0, 3, args);
+	rb_get_kwargs(opts, ids, 0, 2, args);
 
 	if (args[0] != Qundef) {
 	    stats->interval = NUM2INT(args[0]);

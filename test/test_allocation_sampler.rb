@@ -12,26 +12,32 @@ class TestAllocationSampler < Minitest::Test
   end
 
   def test_init_with_location
+    iseq = RubyVM::InstructionSequence.new <<-eoruby
+    Object.new
+    Object.new
+    eoruby
     as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
     as.enable
-    Object.new
-    Object.new
+    iseq.eval
     as.disable
 
-    assert_equal({"Object"=>{"test/test_allocation_sampler.rb"=>{17=>1, 18=>1}}}, as.result)
+    assert_equal({"Object"=>{"<compiled>"=>{1=>1, 2=>1}}}, as.result)
   end
 
   def test_location_same_line
+    iseq = RubyVM::InstructionSequence.new <<-eoruby
+    10.times { Object.new }
+    eoruby
     as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
     as.enable
-    10.times { Object.new }
+    iseq.eval
     as.disable
 
-    assert_equal({"Object"=>{"test/test_allocation_sampler.rb"=>{27=>10}}}, as.result)
+    assert_equal({"Object"=>{"<compiled>"=>{1=>10}}}, as.result)
   end
 
   def test_location_mixed
-    iseq = RubyVM::InstructionSequence.new <<-eoruby, __FILE__
+    iseq = RubyVM::InstructionSequence.new <<-eoruby
     10.times { Object.new }
     Object.new
     eoruby
@@ -40,7 +46,7 @@ class TestAllocationSampler < Minitest::Test
     iseq.eval
     as.disable
 
-    assert_equal({"Object"=>{"test/test_allocation_sampler.rb"=>{1=>10, 2=>1}}}, as.result)
+    assert_equal({"Object"=>{"<compiled>"=>{1=>10, 2=>1}}}, as.result)
   end
 
   def test_location_larger_interval
