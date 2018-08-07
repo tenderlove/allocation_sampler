@@ -6,12 +6,22 @@ class TestAllocationSampler < Minitest::Test
     assert ObjectSpace::AllocationSampler.new
   end
 
+  def test_init_with_params
+    as = ObjectSpace::AllocationSampler.new(interval: 10)
+    assert_equal 10, as.interval
+  end
+
+  def test_interval_default
+    as = ObjectSpace::AllocationSampler.new
+    assert_equal 1, as.interval
+  end
+
   def test_sanity
     as = ObjectSpace::AllocationSampler.new
     as.enable
     Object.new
     as.disable
-    assert_equal({Object => 1}, as.result)
+    assert_equal({Object.name => 1}, as.result)
   end
 
   def test_two_with_same_type
@@ -21,10 +31,7 @@ class TestAllocationSampler < Minitest::Test
     Object.new
     as.disable
 
-    assert_equal({Object => 2}, as.result)
-
-    # Make sure we're aggregating types
-    assert_equal(1, as.record_count)
+    assert_equal({Object.name => 2}, as.result)
   end
 
   class X
@@ -40,7 +47,17 @@ class TestAllocationSampler < Minitest::Test
     Object.new
     as.disable
 
-    assert_equal(501, as.result[Object])
-    assert_equal({Object=>501, TestAllocationSampler::X=>500}, as.result)
+    assert_equal(501, as.result[Object.name])
+    assert_equal({Object.name=>501, TestAllocationSampler::X.name=>500}, as.result)
+  end
+
+  def test_interval
+    as = ObjectSpace::AllocationSampler.new(interval: 10)
+    as.enable
+    500.times do
+      Object.new
+    end
+    as.disable
+    assert_equal({Object.name=>50}, as.result)
   end
 end

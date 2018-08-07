@@ -2,15 +2,10 @@
 #include <ruby/debug.h>
 #include <ruby/st.h>
 
-typedef struct alloc_info {
-    VALUE klass;
-    size_t count;
-} alloc_info_t;
-
 typedef struct {
-    size_t alloc_capa;
-    size_t alloc_next_free;
-    alloc_info_t * alloc_list;
+    st_table * allocations;
+    size_t interval;
+    size_t allocation_count;
     VALUE newobj_hook;
 } trace_stats_t;
 
@@ -18,21 +13,23 @@ static void
 dealloc(void *ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
-    xfree(stats->alloc_list);
+    st_free_table(stats->allocations);
     xfree(stats);
+}
+
+static int
+mark_keys_i(st_data_t key, st_data_t value, void *data)
+{
+    rb_gc_mark((VALUE)key);
+    return ST_CONTINUE;
 }
 
 static void
 mark(void * ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
-    size_t i;
     rb_gc_mark(stats->newobj_hook);
-
-    alloc_info_t * info = stats->alloc_list;
-    for(i = 0; i < stats->alloc_next_free; i++, info++) {
-	rb_gc_mark(info->klass);
-    }
+    st_foreach(stats->allocations, mark_keys_i, stats);
 }
 
 static const rb_data_type_t trace_stats_type = {
@@ -58,35 +55,23 @@ static void
 newobj(VALUE tpval, void *ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
-    rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
-    VALUE obj = rb_tracearg_object(tparg);
-    VALUE klass = RBASIC_CLASS(obj);
-    VALUE uc = user_class(klass, obj);
 
-    if (stats->alloc_next_free == stats->alloc_capa) {
-	size_t new_size = stats->alloc_next_free * 2;
-	stats->alloc_list = xrealloc(stats->alloc_list, sizeof(alloc_info_t) * new_size);
-	stats->alloc_capa = new_size;
-	printf("growing to: %d\n", new_size);
-    }
+    if (!(stats->allocation_count % stats->interval)) {
+	rb_trace_arg_t *tparg = rb_tracearg_from_tracepoint(tpval);
+	VALUE obj = rb_tracearg_object(tparg);
+	VALUE klass = RBASIC_CLASS(obj);
+	VALUE uc = user_class(klass, obj);
 
-    alloc_info_t * info = stats->alloc_list + stats->alloc_next_free;
-
-    if (stats->alloc_next_free > 0) {
-	alloc_info_t * prev_info = stats->alloc_list + stats->alloc_next_free - 1;
-	if (prev_info->klass == uc) {
-	    info = prev_info;
-	} else {
-	    info->count = 0;
-	    stats->alloc_next_free++;
+	if (!NIL_P(uc)) {
+	    unsigned long count;
+	    if(!st_lookup(stats->allocations, uc, &count)) {
+		count = 0;
+	    }
+	    count++;
+	    st_insert(stats->allocations, uc, count);
 	}
-	info->klass = uc;
-	info->count++;
-    } else {
-	info->count = 1;
-	info->klass = uc;
-	stats->alloc_next_free++;
     }
+    stats->allocation_count++;
 }
 
 static VALUE
@@ -94,9 +79,9 @@ allocate(VALUE klass)
 {
     trace_stats_t * stats;
     stats = xmalloc(sizeof(trace_stats_t));
-    stats->alloc_capa = 1000;
-    stats->alloc_next_free = 0;
-    stats->alloc_list = xcalloc(stats->alloc_capa, sizeof(alloc_info_t));
+    stats->allocations = st_init_numtable();;
+    stats->interval = 1;
+    stats->allocation_count = 0;
     stats->newobj_hook = rb_tracepoint_new(0, RUBY_INTERNAL_EVENT_NEWOBJ, newobj, stats);
 
     return TypedData_Wrap_Struct(klass, &trace_stats_type, stats);
@@ -134,53 +119,43 @@ static VALUE
 result(VALUE self)
 {
     trace_stats_t * stats;
-    size_t i;
     VALUE result;
 
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
 
-    st_table * aggregate = st_init_numtable_with_size(stats->alloc_next_free);
     result = rb_hash_new();
-
-    alloc_info_t * info = stats->alloc_list;
-    for(i = 0; i < stats->alloc_next_free; i++, info++) {
-	/* Count needs to be wide enough so `st_lookup` doesn't clobber `info` */
-	unsigned long count;
-	if (!NIL_P(info->klass)) {
-	    if(!st_lookup(aggregate, info->klass, &count)) {
-		count = 0;
-	    }
-	    count += info->count;
-	    st_insert(aggregate, info->klass, count);
-	}
-    }
-    st_foreach(aggregate, insert_to_ruby_hash, result);
+    st_foreach(stats->allocations, insert_to_ruby_hash, result);
 
     return result;
 }
 
 static VALUE
-record_count(VALUE self)
+initialize(int argc, VALUE *argv, VALUE self)
 {
+    VALUE opts;
+    VALUE interval;
     trace_stats_t * stats;
+
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
-    return INT2NUM(stats->alloc_next_free);
+    rb_scan_args(argc, argv, ":", &opts);
+    if (!NIL_P(opts)) {
+	ID ids[1];
+	ids[0] = rb_intern("interval");
+	rb_get_kwargs(opts, ids, 0, 1, &interval);
+	if (interval != Qundef) {
+	    stats->interval = NUM2INT(interval);
+	}
+    }
+
+    return self;
 }
 
 static VALUE
-each_record(VALUE self)
+interval(VALUE self)
 {
     trace_stats_t * stats;
-    size_t i;
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
-
-    alloc_info_t * info = stats->alloc_list;
-    for(i = 0; i < stats->alloc_next_free; i++, info++) {
-	if (!NIL_P(info->klass)) {
-	    rb_yield(rb_ary_new_from_args(2, info->klass, INT2NUM(info->count)));
-	}
-    }
-    return self;
+    return INT2NUM(stats->interval);
 }
 
 void
@@ -189,9 +164,9 @@ Init_allocation_sampler(void)
     VALUE rb_mObjSpace = rb_const_get(rb_cObject, rb_intern("ObjectSpace"));
     rb_cAllocationSampler = rb_define_class_under(rb_mObjSpace, "AllocationSampler", rb_cObject);
     rb_define_alloc_func(rb_cAllocationSampler, allocate);
+    rb_define_method(rb_cAllocationSampler, "initialize", initialize, -1);
     rb_define_method(rb_cAllocationSampler, "enable", enable, 0);
     rb_define_method(rb_cAllocationSampler, "disable", disable, 0);
     rb_define_method(rb_cAllocationSampler, "result", result, 0);
-    rb_define_method(rb_cAllocationSampler, "record_count", record_count, 0);
-    rb_define_method(rb_cAllocationSampler, "each_record", each_record, 0);
+    rb_define_method(rb_cAllocationSampler, "interval", interval, 0);
 }
