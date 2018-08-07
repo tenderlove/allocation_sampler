@@ -104,7 +104,6 @@ static int
 insert_to_ruby_hash(st_data_t key, st_data_t value, void *data)
 {
     VALUE rb_hash = (VALUE)data;
-    rb_p(key);
     rb_hash_aset(rb_hash, (VALUE)key, ULL2NUM((unsigned long)value));
     return ST_CONTINUE;
 }
