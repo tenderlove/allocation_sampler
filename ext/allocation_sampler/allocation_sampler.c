@@ -4,6 +4,7 @@
 
 typedef struct alloc_info {
     VALUE klass;
+    size_t count;
 } alloc_info_t;
 
 typedef struct {
@@ -46,8 +47,8 @@ static const rb_data_type_t trace_stats_type = {
 static VALUE
 user_class(VALUE klass, VALUE obj)
 {
-    if (RTEST(klass) && !RB_TYPE_P(obj, T_NODE)) {
-	return rb_class_real(klass);
+    if (RTEST(klass) && !(RB_TYPE_P(obj, T_IMEMO) || RB_TYPE_P(obj, T_NODE)) && BUILTIN_TYPE(klass) == T_CLASS) {
+	return rb_class_path_cached(rb_class_real(klass));
     } else {
 	return Qnil;
     }
@@ -62,9 +63,30 @@ newobj(VALUE tpval, void *ptr)
     VALUE klass = RBASIC_CLASS(obj);
     VALUE uc = user_class(klass, obj);
 
+    if (stats->alloc_next_free == stats->alloc_capa) {
+	size_t new_size = stats->alloc_next_free * 2;
+	stats->alloc_list = xrealloc(stats->alloc_list, sizeof(alloc_info_t) * new_size);
+	stats->alloc_capa = new_size;
+	printf("growing to: %d\n", new_size);
+    }
+
     alloc_info_t * info = stats->alloc_list + stats->alloc_next_free;
-    info->klass = uc;
-    stats->alloc_next_free++;
+
+    if (stats->alloc_next_free > 0) {
+	alloc_info_t * prev_info = stats->alloc_list + stats->alloc_next_free - 1;
+	if (prev_info->klass == uc) {
+	    info = prev_info;
+	} else {
+	    info->count = 0;
+	    stats->alloc_next_free++;
+	}
+	info->klass = uc;
+	info->count++;
+    } else {
+	info->count = 1;
+	info->klass = uc;
+	stats->alloc_next_free++;
+    }
 }
 
 static VALUE
@@ -74,7 +96,7 @@ allocate(VALUE klass)
     stats = xmalloc(sizeof(trace_stats_t));
     stats->alloc_capa = 1000;
     stats->alloc_next_free = 0;
-    stats->alloc_list = xcalloc(stats->alloc_capal, sizeof(alloc_info_t));
+    stats->alloc_list = xcalloc(stats->alloc_capa, sizeof(alloc_info_t));
     stats->newobj_hook = rb_tracepoint_new(0, RUBY_INTERNAL_EVENT_NEWOBJ, newobj, stats);
 
     return TypedData_Wrap_Struct(klass, &trace_stats_type, stats);
@@ -124,11 +146,13 @@ result(VALUE self)
     for(i = 0; i < stats->alloc_next_free; i++, info++) {
 	/* Count needs to be wide enough so `st_lookup` doesn't clobber `info` */
 	unsigned long count;
-	if(!st_lookup(aggregate, info->klass, &count)) {
-	    count = 0;
+	if (!NIL_P(info->klass)) {
+	    if(!st_lookup(aggregate, info->klass, &count)) {
+		count = 0;
+	    }
+	    count += info->count;
+	    st_insert(aggregate, info->klass, count);
 	}
-	count++;
-	st_insert(aggregate, info->klass, count);
     }
     st_foreach(aggregate, insert_to_ruby_hash, result);
 
@@ -143,6 +167,22 @@ record_count(VALUE self)
     return INT2NUM(stats->alloc_next_free);
 }
 
+static VALUE
+each_record(VALUE self)
+{
+    trace_stats_t * stats;
+    size_t i;
+    TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
+
+    alloc_info_t * info = stats->alloc_list;
+    for(i = 0; i < stats->alloc_next_free; i++, info++) {
+	if (!NIL_P(info->klass)) {
+	    rb_yield(rb_ary_new_from_args(2, info->klass, INT2NUM(info->count)));
+	}
+    }
+    return self;
+}
+
 void
 Init_allocation_sampler(void)
 {
@@ -153,4 +193,5 @@ Init_allocation_sampler(void)
     rb_define_method(rb_cAllocationSampler, "disable", disable, 0);
     rb_define_method(rb_cAllocationSampler, "result", result, 0);
     rb_define_method(rb_cAllocationSampler, "record_count", record_count, 0);
+    rb_define_method(rb_cAllocationSampler, "each_record", each_record, 0);
 }
