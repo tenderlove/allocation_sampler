@@ -19,14 +19,6 @@ as.disable
 as.result # => {"Object"=>{"<compiled>"=>{1=>10}}}
 ```
 
-## REQUIREMENTS:
-
-* FIX (list of requirements)
-
-## INSTALL:
-
-* FIX (sudo gem install, anything else)
-
 ## LICENSE:
 
 (The MIT License)
