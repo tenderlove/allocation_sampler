@@ -11,6 +11,45 @@ class TestAllocationSampler < Minitest::Test
     assert_equal 10, as.interval
   end
 
+  def test_init_with_location
+    as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
+    as.enable
+    Object.new
+    Object.new
+    as.disable
+
+    assert_equal({"Object"=>{"test/test_allocation_sampler.rb"=>{17=>1, 18=>1}}}, as.result)
+  end
+
+  def test_location_same_line
+    as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
+    as.enable
+    10.times { Object.new }
+    as.disable
+
+    assert_equal({"Object"=>{"test/test_allocation_sampler.rb"=>{27=>10}}}, as.result)
+  end
+
+  def test_location_mixed
+    as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
+    as.enable
+    10.times { Object.new }
+    Object.new
+    as.disable
+
+    assert_equal({"Object"=>{"test/test_allocation_sampler.rb"=>{36=>10, 37=>1}}}, as.result)
+  end
+
+  def test_location_larger_interval
+    as = ObjectSpace::AllocationSampler.new(interval: 10, location: true)
+    as.enable
+    10.times { Object.new }
+    Object.new
+    as.disable
+
+    assert_equal({"Object"=>{"test/test_allocation_sampler.rb"=>{46=>1, 47=>1}}}, as.result)
+  end
+
   def test_interval_default
     as = ObjectSpace::AllocationSampler.new
     assert_equal 1, as.interval
