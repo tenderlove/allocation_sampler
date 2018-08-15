@@ -11,6 +11,13 @@ class TestAllocationSampler < Minitest::Test
     assert_equal 10, as.interval
   end
 
+  def test_location?
+    as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
+    assert_predicate as, :location?
+    as = ObjectSpace::AllocationSampler.new(interval: 1)
+    refute_predicate as, :location?
+  end
+
   def test_init_with_location
     iseq = RubyVM::InstructionSequence.new <<-eoruby
     Object.new
