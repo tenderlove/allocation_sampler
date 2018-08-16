@@ -14,6 +14,10 @@ HOE = Hoe.spec 'allocation_sampler' do
   self.readme_file   = 'README.md'
   self.history_file  = 'CHANGELOG.md'
   self.extra_rdoc_files  = FileList['*.md']
+  self.license 'MIT'
+  self.spec_extras = {
+    :extensions => ["ext/allocation_sampler/extconf.rb"],
+  }
 end
 
 Rake::ExtensionTask.new("allocation_sampler", HOE.spec)
