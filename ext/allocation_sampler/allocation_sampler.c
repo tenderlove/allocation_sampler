@@ -49,6 +49,50 @@ make_allocation_data(void)
 }
 
 static int
+increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists)
+{
+    allocation_data_t * allocation_data;
+
+    if (exists) {
+	allocation_data = (allocation_data_t *)*data;
+    } else {
+	allocation_data = make_allocation_data();
+	*data = (st_data_t)allocation_data;
+    }
+    allocation_data->count++;
+    return ST_CONTINUE;
+}
+
+typedef struct {
+    unsigned long line_number;
+    size_t path_length;
+} update_args_t;
+
+static int
+update_file_path_table(st_data_t *k, st_data_t *v, st_data_t arg, int exists)
+{
+    st_table * line_table;
+    char * filename;
+    size_t strlen;
+    update_args_t *args = (update_args_t *)arg;
+
+    if (exists) {
+	line_table = (st_table *)*v;
+    } else {
+	strlen = args->path_length;
+	line_table = st_init_numtable();
+	*v = (st_data_t)line_table;
+
+	filename = xmalloc(strlen + 1);
+	strncpy(filename, (char *)*k, strlen);
+	filename[strlen] = 0;
+	*k = filename;
+    }
+
+    return st_update(line_table, args->line_number, increment_line_count, 1);
+}
+
+static int
 free_allocation_data_i(st_data_t line_number, st_data_t allocation_data, st_data_t ctx)
 {
     xfree((allocation_data_t *)allocation_data);
@@ -152,22 +196,10 @@ newobj(VALUE tpval, void *ptr)
 		    allocation_data->count++;
 		    st_insert(line_table, fline, allocation_data);
 		} else {
-		    if (!st_lookup(file_table, (st_data_t)RSTRING_PTR(path), (st_data_t *)&line_table)) {
-			line_table = st_init_numtable();
-			filename = xmalloc(RSTRING_LEN(path) + 1);
-			strncpy(filename, RSTRING_PTR(path), RSTRING_LEN(path));
-			filename[RSTRING_LEN(path)] = 0;
-			st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
-			allocation_data = make_allocation_data();
-			allocation_data->count++;
-			st_insert(line_table, fline, allocation_data);
-		    } else {
-			if (!st_lookup(line_table, NUM2ULL(line), &allocation_data)) {
-			    allocation_data = make_allocation_data();
-			}
-			allocation_data->count++;
-			st_insert(line_table, fline, allocation_data);
-		    }
+		    update_args_t args;
+		    args.line_number = fline;
+		    args.path_length = RSTRING_LEN(path);
+		    st_update(file_table, (st_data_t)RSTRING_PTR(path), update_file_path_table, &args);
 		}
 	    }
 	}
