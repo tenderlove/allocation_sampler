@@ -38,10 +38,28 @@ typedef struct {
     VALUE newobj_hook;
 } trace_stats_t;
 
+typedef struct {
+    unsigned long count;
+} allocation_data_t;
+
+static allocation_data_t *
+make_allocation_data(void)
+{
+    return xcalloc(1, sizeof(allocation_data_t));
+}
+
+static int
+free_allocation_data_i(st_data_t line_number, st_data_t allocation_data, st_data_t ctx)
+{
+    xfree((allocation_data_t *)allocation_data);
+    return ST_CONTINUE;
+}
+
 static int
 free_line_tables_i(st_data_t path, st_data_t line_table, st_data_t ctx)
 {
     /* line table only contains long => long, so nothing to free */
+    st_foreach((st_table *)line_table, free_allocation_data_i, ctx);
     st_free_table((st_table *)line_table);
     xfree((char *)path);
     return ST_CONTINUE;
@@ -111,6 +129,7 @@ newobj(VALUE tpval, void *ptr)
 
 	if (!NIL_P(uc)) {
 	    unsigned long count;
+	    allocation_data_t * allocation_data;
 	    VALUE path = rb_tracearg_path(tparg);
 	    VALUE line = rb_tracearg_lineno(tparg);
 
@@ -129,7 +148,9 @@ newobj(VALUE tpval, void *ptr)
 		    filename[RSTRING_LEN(path)] = 0;
 		    st_insert(stats->allocations, uc, (st_data_t)file_table);
 		    st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
-		    st_insert(line_table, fline, (unsigned long)1);
+		    allocation_data = make_allocation_data();
+		    allocation_data->count++;
+		    st_insert(line_table, fline, allocation_data);
 		} else {
 		    if (!st_lookup(file_table, (st_data_t)RSTRING_PTR(path), (st_data_t *)&line_table)) {
 			line_table = st_init_numtable();
@@ -137,13 +158,15 @@ newobj(VALUE tpval, void *ptr)
 			strncpy(filename, RSTRING_PTR(path), RSTRING_LEN(path));
 			filename[RSTRING_LEN(path)] = 0;
 			st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
-			st_insert(line_table, fline, (unsigned long)1);
+			allocation_data = make_allocation_data();
+			allocation_data->count++;
+			st_insert(line_table, fline, allocation_data);
 		    } else {
-			if (!st_lookup(line_table, NUM2ULL(line), &count)) {
-			    count = 0;
+			if (!st_lookup(line_table, NUM2ULL(line), &allocation_data)) {
+			    allocation_data = make_allocation_data();
 			}
-			count++;
-			st_insert(line_table, NUM2ULL(line), count);
+			allocation_data->count++;
+			st_insert(line_table, fline, allocation_data);
 		    }
 		}
 	    }
@@ -186,10 +209,11 @@ disable(VALUE self)
 }
 
 static int
-insert_line_to_ruby_hash(st_data_t line, st_data_t count, void *data)
+insert_line_to_ruby_hash(st_data_t line, st_data_t value, void *data)
 {
     VALUE rb_line_hash = (VALUE)data;
-    rb_hash_aset(rb_line_hash, ULL2NUM((unsigned long)line), ULL2NUM((unsigned long)count));
+    allocation_data_t * allocation_data = (allocation_data_t *)value;
+    rb_hash_aset(rb_line_hash, ULL2NUM((unsigned long)line), ULL2NUM(allocation_data->count));
     return ST_CONTINUE;
 }
 
