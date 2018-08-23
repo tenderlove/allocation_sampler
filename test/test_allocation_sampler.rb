@@ -11,19 +11,12 @@ class TestAllocationSampler < Minitest::Test
     assert_equal 10, as.interval
   end
 
-  def test_location?
-    as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
-    assert_predicate as, :location?
-    as = ObjectSpace::AllocationSampler.new(interval: 1)
-    refute_predicate as, :location?
-  end
-
   def test_init_with_location
     iseq = RubyVM::InstructionSequence.new <<-eoruby
     Object.new
     Object.new
     eoruby
-    as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
+    as = ObjectSpace::AllocationSampler.new(interval: 1)
     as.enable
     iseq.eval
     as.disable
@@ -35,7 +28,7 @@ class TestAllocationSampler < Minitest::Test
     iseq = RubyVM::InstructionSequence.new <<-eoruby
     10.times { Object.new }
     eoruby
-    as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
+    as = ObjectSpace::AllocationSampler.new(interval: 1)
     as.enable
     iseq.eval
     as.disable
@@ -48,7 +41,7 @@ class TestAllocationSampler < Minitest::Test
     10.times { Object.new }
     Object.new
     eoruby
-    as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
+    as = ObjectSpace::AllocationSampler.new(interval: 1)
     as.enable
     iseq.eval
     as.disable
@@ -61,7 +54,7 @@ class TestAllocationSampler < Minitest::Test
     100.times { Object.new }
     100.times { Object.new }
     eom
-    as = ObjectSpace::AllocationSampler.new(interval: 10, location: true)
+    as = ObjectSpace::AllocationSampler.new(interval: 10)
     as.enable
     iseq.eval
     as.disable
@@ -75,14 +68,6 @@ class TestAllocationSampler < Minitest::Test
     assert_equal 1, as.interval
   end
 
-  def test_sanity
-    as = ObjectSpace::AllocationSampler.new
-    as.enable
-    Object.new
-    as.disable
-    assert_equal({Object.name => 1}, as.result)
-  end
-
   def test_two_with_same_type
     as = ObjectSpace::AllocationSampler.new
     as.enable
@@ -90,7 +75,7 @@ class TestAllocationSampler < Minitest::Test
     Object.new
     as.disable
 
-    assert_equal({Object.name => 2}, as.result)
+    assert_equal(2, as.result[Object.name].values.flat_map(&:values).inject(:+))
   end
 
   class X
@@ -106,17 +91,7 @@ class TestAllocationSampler < Minitest::Test
     Object.new
     as.disable
 
-    assert_equal(501, as.result[Object.name])
-    assert_equal({Object.name=>501, TestAllocationSampler::X.name=>500}, as.result)
-  end
-
-  def test_interval
-    as = ObjectSpace::AllocationSampler.new(interval: 10)
-    as.enable
-    500.times do
-      Object.new
-    end
-    as.disable
-    assert_equal({Object.name=>50}, as.result)
+    assert_equal(501, as.result[Object.name].values.flat_map(&:values).inject(:+))
+    assert_equal(500, as.result[TestAllocationSampler::X.name].values.flat_map(&:values).inject(:+))
   end
 end

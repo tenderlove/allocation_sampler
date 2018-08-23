@@ -11,7 +11,7 @@ is a time limit on completion of the program.
 ## SYNOPSIS:
 
 ```ruby
-as = ObjectSpace::AllocationSampler.new(interval: 1, location: true)
+as = ObjectSpace::AllocationSampler.new(interval: 1)
 as.enable
 10.times { Object.new }
 as.disable

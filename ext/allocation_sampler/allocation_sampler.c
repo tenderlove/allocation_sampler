@@ -4,7 +4,6 @@
 
 typedef struct {
     st_table * allocations;
-    int location;
     size_t interval;
     size_t allocation_count;
     VALUE newobj_hook;
@@ -31,9 +30,7 @@ static void
 dealloc(void *ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
-    if (stats->location) {
-	st_foreach(stats->allocations, free_path_tables_i, (st_data_t)stats);
-    }
+    st_foreach(stats->allocations, free_path_tables_i, (st_data_t)stats);
     st_free_table(stats->allocations);
     xfree(stats);
 }
@@ -85,49 +82,41 @@ newobj(VALUE tpval, void *ptr)
 
 	if (!NIL_P(uc)) {
 	    unsigned long count;
-	    if (stats->location) {
-		VALUE path = rb_tracearg_path(tparg);
-		VALUE line = rb_tracearg_lineno(tparg);
+	    VALUE path = rb_tracearg_path(tparg);
+	    VALUE line = rb_tracearg_lineno(tparg);
 
-		if (RTEST(path)) {
-		    st_table * file_table;
-		    st_table * line_table;
-		    char * filename;
-		    unsigned long fline = NUM2ULL(line);
+	    if (RTEST(path)) {
+		st_table * file_table;
+		st_table * line_table;
+		char * filename;
+		unsigned long fline = NUM2ULL(line);
 
-		    if(!st_lookup(stats->allocations, uc, (st_data_t *)&file_table)) {
-			file_table = st_init_strtable();
+		if(!st_lookup(stats->allocations, uc, (st_data_t *)&file_table)) {
+		    file_table = st_init_strtable();
+		    line_table = st_init_numtable();
+
+		    filename = xmalloc(RSTRING_LEN(path) + 1);
+		    strncpy(filename, RSTRING_PTR(path), RSTRING_LEN(path));
+		    filename[RSTRING_LEN(path)] = 0;
+		    st_insert(stats->allocations, uc, (st_data_t)file_table);
+		    st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
+		    st_insert(line_table, fline, (unsigned long)1);
+		} else {
+		    if (!st_lookup(file_table, (st_data_t)RSTRING_PTR(path), (st_data_t *)&line_table)) {
 			line_table = st_init_numtable();
-
 			filename = xmalloc(RSTRING_LEN(path) + 1);
 			strncpy(filename, RSTRING_PTR(path), RSTRING_LEN(path));
 			filename[RSTRING_LEN(path)] = 0;
-			st_insert(stats->allocations, uc, (st_data_t)file_table);
 			st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
 			st_insert(line_table, fline, (unsigned long)1);
 		    } else {
-			if (!st_lookup(file_table, (st_data_t)RSTRING_PTR(path), (st_data_t *)&line_table)) {
-			    line_table = st_init_numtable();
-			    filename = xmalloc(RSTRING_LEN(path) + 1);
-			    strncpy(filename, RSTRING_PTR(path), RSTRING_LEN(path));
-			    filename[RSTRING_LEN(path)] = 0;
-			    st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
-			    st_insert(line_table, fline, (unsigned long)1);
-			} else {
-			    if (!st_lookup(line_table, NUM2ULL(line), &count)) {
-				count = 0;
-			    }
-			    count++;
-			    st_insert(line_table, NUM2ULL(line), count);
+			if (!st_lookup(line_table, NUM2ULL(line), &count)) {
+			    count = 0;
 			}
+			count++;
+			st_insert(line_table, NUM2ULL(line), count);
 		    }
 		}
-	    } else {
-		if(!st_lookup(stats->allocations, uc, &count)) {
-		    count = 0;
-		}
-		count++;
-		st_insert(stats->allocations, uc, count);
 	    }
 	}
     }
@@ -142,7 +131,6 @@ allocate(VALUE klass)
     stats->allocations = st_init_numtable();;
     stats->interval = 1;
     stats->allocation_count = 0;
-    stats->location = 0;
     stats->newobj_hook = rb_tracepoint_new(0, RUBY_INTERNAL_EVENT_NEWOBJ, newobj, stats);
 
     return TypedData_Wrap_Struct(klass, &trace_stats_type, stats);
@@ -196,14 +184,6 @@ insert_class_to_ruby_hash(st_data_t classname, st_data_t pathtable, void *data)
     return ST_CONTINUE;
 }
 
-static int
-insert_to_ruby_hash(st_data_t key, st_data_t value, void *data)
-{
-    VALUE rb_hash = (VALUE)data;
-    rb_hash_aset(rb_hash, (VALUE)key, ULL2NUM((unsigned long)value));
-    return ST_CONTINUE;
-}
-
 static VALUE
 result(VALUE self)
 {
@@ -213,11 +193,7 @@ result(VALUE self)
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
 
     result = rb_hash_new();
-    if (stats->location) {
-	st_foreach(stats->allocations, insert_class_to_ruby_hash, result);
-    } else {
-	st_foreach(stats->allocations, insert_to_ruby_hash, result);
-    }
+    st_foreach(stats->allocations, insert_class_to_ruby_hash, result);
 
     return result;
 }
@@ -234,15 +210,10 @@ initialize(int argc, VALUE *argv, VALUE self)
 	ID ids[2];
 	VALUE args[2];
 	ids[0] = rb_intern("interval");
-	ids[1] = rb_intern("location");
-	rb_get_kwargs(opts, ids, 0, 2, args);
+	rb_get_kwargs(opts, ids, 0, 1, args);
 
 	if (args[0] != Qundef) {
 	    stats->interval = NUM2INT(args[0]);
-	}
-
-	if (args[1] != Qundef) {
-	    stats->location = 1;
 	}
     }
 
@@ -265,14 +236,6 @@ allocation_count(VALUE self)
     return INT2NUM(stats->allocation_count);
 }
 
-static VALUE
-location_p(VALUE self)
-{
-    trace_stats_t * stats;
-    TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
-    return stats->location ? Qtrue : Qfalse;
-}
-
 void
 Init_allocation_sampler(void)
 {
@@ -284,6 +247,5 @@ Init_allocation_sampler(void)
     rb_define_method(rb_cAllocationSampler, "disable", disable, 0);
     rb_define_method(rb_cAllocationSampler, "result", result, 0);
     rb_define_method(rb_cAllocationSampler, "interval", interval, 0);
-    rb_define_method(rb_cAllocationSampler, "location?", location_p, 0);
     rb_define_method(rb_cAllocationSampler, "allocation_count", allocation_count, 0);
 }
