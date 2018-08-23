@@ -2,6 +2,35 @@
 #include <ruby/debug.h>
 #include <ruby/st.h>
 
+/*
+digraph objects {
+  node [ shape="record" ];
+
+  trace_stats_t [
+   label = "{
+   <f0> trace_stats_t * |
+   <f1> st_table * allocations
+   }"
+  ];
+
+  allocations [ label = "{ stats-&gt;allocations | st_table * (numtable) }" ];
+  file_table  [ label = "{ file_table | st_table * (numtable) }" ];
+  line_table  [ label = "{ line_table | st_table * (numtable) }" ];
+  class_name  [ label = "VALUE class_name" ];
+  filename    [ label = "VALUE filename" ];
+  line_number [ label = "VALUE line_number" ];
+  count       [ label = "VALUE count" ];
+
+  trace_stats_t:f1 -> allocations;
+  allocations -> class_name  [ label = "key" ];
+  allocations -> file_table  [ label = "value" ];
+  file_table  -> filename    [ label = "key" ];
+  file_table  -> line_table  [ label = "value" ];
+  line_table  -> line_number [ label = "key" ];
+  line_table  -> count       [ label = "value" ];
+}
+*/
+
 typedef struct {
     st_table * allocations;
     size_t interval;
