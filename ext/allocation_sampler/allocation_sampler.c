@@ -14,12 +14,12 @@ digraph objects {
   ];
 
   allocations [ label = "{ stats-&gt;allocations | st_table * (numtable) }" ];
-  file_table  [ label = "{ file_table | st_table * (numtable) }" ];
+  file_table  [ label = "{ file_table | st_table * (strtable) }" ];
   line_table  [ label = "{ line_table | st_table * (numtable) }" ];
   class_name  [ label = "VALUE class_name" ];
-  filename    [ label = "VALUE filename" ];
-  line_number [ label = "VALUE line_number" ];
-  count       [ label = "VALUE count" ];
+  filename    [ label = "char * filename" ];
+  line_number [ label = "unsigned long line_number" ];
+  count       [ label = "unsigned long count" ];
 
   trace_stats_t:f1 -> allocations;
   allocations -> class_name  [ label = "key" ];
