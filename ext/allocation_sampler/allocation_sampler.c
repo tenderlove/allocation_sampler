@@ -40,18 +40,63 @@ typedef struct {
 
 typedef struct {
     unsigned long count;
+    st_table *frames;
 } allocation_data_t;
+
+typedef struct {
+    unsigned long line_number;
+    size_t path_length;
+    char * path;
+    VALUE * frames_buffer;
+    int * lines_buffer;
+    int frame_count;
+} update_args_t;
+
+typedef struct {
+    size_t total_samples;
+    size_t caller_samples;
+    size_t seen_at_sample_number;
+    st_table *edges;
+    st_table *lines;
+} frame_data_t;
 
 static allocation_data_t *
 make_allocation_data(void)
 {
-    return xcalloc(1, sizeof(allocation_data_t));
+    allocation_data_t * allocation;
+
+    allocation = (allocation_data_t *)xcalloc(1, sizeof(allocation_data_t));
+    allocation->frames = st_init_numtable();
+    return allocation;
+}
+
+static frame_data_t *
+sample_for(allocation_data_t * allocation, VALUE frame)
+{
+    st_data_t key = (st_data_t)frame, val = 0;
+    frame_data_t *frame_data;
+
+    if (st_lookup(allocation->frames, key, &val)) {
+        frame_data = (frame_data_t *)val;
+    } else {
+        frame_data = xcalloc(1, sizeof(frame_data_t));
+	frame_data->edges = st_init_numtable();
+	frame_data->lines = st_init_numtable();
+
+        val = (st_data_t)frame_data;
+        st_insert(allocation->frames, key, val);
+    }
+
+    return frame_data;
 }
 
 static int
 increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists)
 {
     allocation_data_t * allocation_data;
+    frame_data_t * frame_data;
+    int i;
+    update_args_t *args = (update_args_t *)arg;
 
     if (exists) {
 	allocation_data = (allocation_data_t *)*data;
@@ -59,15 +104,20 @@ increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists
 	allocation_data = make_allocation_data();
 	*data = (st_data_t)allocation_data;
     }
+
+    for(i = 0; i < args->frame_count; i++) {
+	int line = args->lines_buffer[i];
+	VALUE frame = args->frames_buffer[i];
+	frame_data_t * frame_data = sample_for(allocation_data, frame);
+
+	if (i == 0) {
+	} else {
+	}
+    }
+
     allocation_data->count++;
     return ST_CONTINUE;
 }
-
-typedef struct {
-    unsigned long line_number;
-    size_t path_length;
-    char * path;
-} update_args_t;
 
 static int
 update_file_path_table(st_data_t *k, st_data_t *v, st_data_t arg, int exists)
@@ -90,7 +140,7 @@ update_file_path_table(st_data_t *k, st_data_t *v, st_data_t arg, int exists)
 	*k = (st_data_t)filename;
     }
 
-    return st_update(line_table, args->line_number, increment_line_count, 1);
+    return st_update(line_table, args->line_number, increment_line_count, arg);
 }
 
 static int
@@ -110,9 +160,21 @@ update_class_name_table(st_data_t *k, st_data_t *v, st_data_t arg, int exists)
 }
 
 static int
+free_frame_data_i(st_data_t frame, st_data_t _frame_data, st_data_t ctx)
+{
+    frame_data_t * frame_data = (frame_data_t *)_frame_data;
+    st_free_table(frame_data->edges);
+    st_free_table(frame_data->lines);
+    return ST_CONTINUE;
+}
+
+static int
 free_allocation_data_i(st_data_t line_number, st_data_t allocation_data, st_data_t ctx)
 {
-    xfree((allocation_data_t *)allocation_data);
+    allocation_data_t * allocation = (allocation_data_t *)allocation_data;
+    st_foreach((st_table *)allocation->frames, free_frame_data_i, ctx);
+    st_free_table(allocation->frames);
+    xfree(allocation);
     return ST_CONTINUE;
 }
 
@@ -144,9 +206,35 @@ dealloc(void *ptr)
 }
 
 static int
-mark_keys_i(st_data_t key, st_data_t value, void *data)
+mark_frames_table_i(st_data_t key, st_data_t value, void *data)
 {
+    rb_gc_mark((VALUE)key); /* Mark the frame */
+    return ST_CONTINUE;
+}
+
+static int
+mark_line_table_i(st_data_t key, st_data_t value, void *data)
+{
+    allocation_data_t * allocation = (allocation_data_t *)value;
+    st_foreach(allocation->frames, mark_frames_table_i, (st_data_t)data);
+    return ST_CONTINUE;
+}
+
+static int
+mark_file_table_i(st_data_t key, st_data_t value, void *data)
+{
+    st_table * line_table = (st_table *)value;
+    st_foreach(line_table, mark_line_table_i, (st_data_t)data);
+    return ST_CONTINUE;
+}
+
+static int
+mark_class_table_i(st_data_t key, st_data_t value, void *data)
+{
+    st_table * file_table = (st_table *)value;
+
     rb_gc_mark((VALUE)key);
+    st_foreach(file_table, mark_file_table_i, (st_data_t)data);
     return ST_CONTINUE;
 }
 
@@ -155,7 +243,7 @@ mark(void * ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
     rb_gc_mark(stats->newobj_hook);
-    st_foreach(stats->allocations, mark_keys_i, (st_data_t)stats);
+    st_foreach(stats->allocations, mark_class_table_i, (st_data_t)stats);
 }
 
 static const rb_data_type_t trace_stats_type = {
@@ -177,6 +265,8 @@ user_class(VALUE klass, VALUE obj)
     }
 }
 
+#define BUF_SIZE 2048
+
 static void
 newobj(VALUE tpval, void *ptr)
 {
@@ -191,14 +281,21 @@ newobj(VALUE tpval, void *ptr)
 	if (!NIL_P(uc)) {
 	    unsigned long count;
 	    allocation_data_t * allocation_data;
+	    VALUE frames_buffer[BUF_SIZE];
+	    int lines_buffer[BUF_SIZE];
+	    int num;
+
 	    VALUE path = rb_tracearg_path(tparg);
 	    VALUE line = rb_tracearg_lineno(tparg);
 
 	    if (RTEST(path)) {
 		update_args_t args;
-		args.line_number = NUM2ULL(line);
-		args.path        = RSTRING_PTR(path);
-		args.path_length = RSTRING_LEN(path);
+		args.frame_count   = rb_profile_frames(0, sizeof(frames_buffer) / sizeof(VALUE), frames_buffer, lines_buffer);
+		args.line_number   = NUM2ULL(line);
+		args.path          = RSTRING_PTR(path);
+		args.path_length   = RSTRING_LEN(path);
+		args.frames_buffer = frames_buffer;
+		args.lines_buffer  = lines_buffer;
 		st_update(stats->allocations, (st_data_t)uc, update_class_name_table, (st_data_t)&args);
 	    }
 	}
