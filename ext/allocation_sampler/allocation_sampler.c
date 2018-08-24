@@ -35,6 +35,7 @@ typedef struct {
     st_table * allocations;
     size_t interval;
     size_t allocation_count;
+    size_t overall_samples;
     VALUE newobj_hook;
 } trace_stats_t;
 
@@ -50,6 +51,7 @@ typedef struct {
     VALUE * frames_buffer;
     int * lines_buffer;
     int frame_count;
+    size_t overall_samples;
 } update_args_t;
 
 typedef struct {
@@ -91,6 +93,26 @@ sample_for(allocation_data_t * allocation, VALUE frame)
 }
 
 static int
+numtable_increment_callback(st_data_t *key, st_data_t *value, st_data_t arg, int existing)
+{
+    size_t *weight = (size_t *)value;
+    size_t increment = (size_t)arg;
+
+    if (existing)
+	(*weight) += increment;
+    else
+	*weight = increment;
+
+    return ST_CONTINUE;
+}
+
+void
+st_numtable_increment(st_table *table, st_data_t key, size_t increment)
+{
+    st_update(table, key, numtable_increment_callback, (st_data_t)increment);
+}
+
+static int
 increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists)
 {
     allocation_data_t * allocation_data;
@@ -105,14 +127,33 @@ increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists
 	*data = (st_data_t)allocation_data;
     }
 
+    VALUE prev_frame;
+
     for(i = 0; i < args->frame_count; i++) {
 	int line = args->lines_buffer[i];
 	VALUE frame = args->frames_buffer[i];
 	frame_data_t * frame_data = sample_for(allocation_data, frame);
 
-	if (i == 0) {
-	} else {
+	/* Don't count the same frame in a stack twice */
+	if (frame_data->seen_at_sample_number != args->overall_samples) {
+	    frame_data->total_samples++;
 	}
+	frame_data->seen_at_sample_number = args->overall_samples;
+
+	if (i == 0) {
+	    frame_data->caller_samples++;
+	} else {
+	    st_numtable_increment(frame_data->edges, (st_data_t)prev_frame, 1);
+	}
+
+	if (line > 0) {
+	    /* Lower half is when the frame is at the top of the stack,
+	     * upper half is non-top level frames */
+	    size_t half = (size_t)1<<(8*SIZEOF_SIZE_T/2);
+	    size_t increment = i == 0 ? half + 1 : half;
+	    st_numtable_increment(frame_data->lines, (st_data_t)line, increment);
+	}
+	prev_frame = frame;
     }
 
     allocation_data->count++;
@@ -290,12 +331,15 @@ newobj(VALUE tpval, void *ptr)
 
 	    if (RTEST(path)) {
 		update_args_t args;
-		args.frame_count   = rb_profile_frames(0, sizeof(frames_buffer) / sizeof(VALUE), frames_buffer, lines_buffer);
-		args.line_number   = NUM2ULL(line);
-		args.path          = RSTRING_PTR(path);
-		args.path_length   = RSTRING_LEN(path);
-		args.frames_buffer = frames_buffer;
-		args.lines_buffer  = lines_buffer;
+
+		stats->overall_samples++;
+		args.overall_samples = stats->overall_samples;
+		args.frame_count     = rb_profile_frames(0, sizeof(frames_buffer) / sizeof(VALUE), frames_buffer, lines_buffer);
+		args.line_number     = NUM2ULL(line);
+		args.path            = RSTRING_PTR(path);
+		args.path_length     = RSTRING_LEN(path);
+		args.frames_buffer   = frames_buffer;
+		args.lines_buffer    = lines_buffer;
 		st_update(stats->allocations, (st_data_t)uc, update_class_name_table, (st_data_t)&args);
 	    }
 	}
@@ -311,6 +355,7 @@ allocate(VALUE klass)
     stats->allocations = st_init_numtable();;
     stats->interval = 1;
     stats->allocation_count = 0;
+    stats->overall_samples = 0;
     stats->newobj_hook = rb_tracepoint_new(0, RUBY_INTERNAL_EVENT_NEWOBJ, newobj, stats);
 
     return TypedData_Wrap_Struct(klass, &trace_stats_type, stats);
