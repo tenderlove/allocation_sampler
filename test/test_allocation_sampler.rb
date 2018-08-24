@@ -21,7 +21,7 @@ class TestAllocationSampler < Minitest::Test
     iseq.eval
     as.disable
 
-    assert_equal({"Object"=>{"<compiled>"=>{1=>1, 2=>1}}}, as.result)
+    assert_equal({"Object"=>{"<compiled>"=>{1=>1, 2=>1}}}, filter(as.result))
   end
 
   def test_location_same_line
@@ -33,7 +33,7 @@ class TestAllocationSampler < Minitest::Test
     iseq.eval
     as.disable
 
-    assert_equal({"Object"=>{"<compiled>"=>{1=>10}}}, as.result)
+    assert_equal({"Object"=>{"<compiled>"=>{1=>10}}}, filter(as.result))
   end
 
   def test_location_mixed
@@ -46,7 +46,7 @@ class TestAllocationSampler < Minitest::Test
     iseq.eval
     as.disable
 
-    assert_equal({"Object"=>{"<compiled>"=>{1=>10, 2=>1}}}, as.result)
+    assert_equal({"Object"=>{"<compiled>"=>{1=>10, 2=>1}}}, filter(as.result))
   end
 
   def test_location_from_method
@@ -75,7 +75,7 @@ class TestAllocationSampler < Minitest::Test
     iseq.eval
     as.disable
 
-    assert_equal({"Object"=>{"<compiled>"=>{1=>10, 2=>10}}}, as.result)
+    assert_equal({"Object"=>{"<compiled>"=>{1=>10, 2=>10}}}, filter(as.result))
     assert_equal 201, as.allocation_count
   end
 
@@ -91,7 +91,7 @@ class TestAllocationSampler < Minitest::Test
     Object.new
     as.disable
 
-    assert_equal(2, as.result[Object.name].values.flat_map(&:values).inject(:+))
+    assert_equal(2, filter(as.result)[Object.name].values.flat_map(&:values).inject(:+))
   end
 
   class X
@@ -107,7 +107,45 @@ class TestAllocationSampler < Minitest::Test
     Object.new
     as.disable
 
-    assert_equal(501, as.result[Object.name].values.flat_map(&:values).inject(:+))
-    assert_equal(500, as.result[TestAllocationSampler::X.name].values.flat_map(&:values).inject(:+))
+    assert_equal(501, filter(as.result)[Object.name].values.flat_map(&:values).inject(:+))
+    assert_equal(500, filter(as.result)[TestAllocationSampler::X.name].values.flat_map(&:values).inject(:+))
+  end
+
+  def d; Object.new; end
+  def c2; 5.times { d }; end
+  def c;  5.times { d }; end
+  def b;  50.times { rand < 0.5 ? c : c2 }; end
+  def a;  5.times { b }; end
+
+  def test_stack_trace
+    as = ObjectSpace::AllocationSampler.new
+    as.enable
+    a
+    as.disable
+    result = as.result
+    result.each_pair do |class_name, path_hash|
+      path_hash.each_pair do |path_name, line_hash|
+        line_hash.each_pair do |line, (count, frames)|
+          p [class_name, path_name, line, count]
+          frames.sort_by { |_, stats| stats[:samples] }.reverse_each do |frame, info|
+            p info
+            call, total = info[:samples], info[:total_samples]
+            printf "% 10d % 8s  % 10d % 8s     %s\n", total, "(%2.1f%%)" % (total*100.0/count), call, "(%2.1f%%)" % (call*100.0/count), info[:name]
+          end
+        end
+      end
+    end
+  end
+
+  private
+
+  def filter result
+    result.each_with_object({}) do |(k,v), a|
+      a[k] = v.each_with_object({}) do |(k2,v2), b|
+        b[k2] = v2.each_with_object({}) do |(k3, v3), c|
+          c[k3] = v3.first
+        end
+      end
+    end
   end
 end

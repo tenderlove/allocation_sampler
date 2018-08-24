@@ -31,6 +31,9 @@ digraph objects {
 }
 */
 
+static VALUE sym_name, sym_file, sym_line, sym_total_samples, sym_samples;
+static VALUE sym_edges, sym_lines;
+
 typedef struct {
     st_table * allocations;
     size_t interval;
@@ -82,8 +85,6 @@ sample_for(allocation_data_t * allocation, VALUE frame)
         frame_data = (frame_data_t *)val;
     } else {
         frame_data = xcalloc(1, sizeof(frame_data_t));
-	frame_data->edges = st_init_numtable();
-	frame_data->lines = st_init_numtable();
 
         val = (st_data_t)frame_data;
         st_insert(allocation->frames, key, val);
@@ -143,6 +144,10 @@ increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists
 	if (i == 0) {
 	    frame_data->caller_samples++;
 	} else {
+	    if (!frame_data->edges)
+		frame_data->edges = st_init_numtable();
+
+	    frame_data->edges = st_init_numtable();
 	    st_numtable_increment(frame_data->edges, (st_data_t)prev_frame, 1);
 	}
 
@@ -151,6 +156,10 @@ increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists
 	     * upper half is non-top level frames */
 	    size_t half = (size_t)1<<(8*SIZEOF_SIZE_T/2);
 	    size_t increment = i == 0 ? half + 1 : half;
+
+	    if (!frame_data->lines)
+		frame_data->lines = st_init_numtable();
+
 	    st_numtable_increment(frame_data->lines, (st_data_t)line, increment);
 	}
 	prev_frame = frame;
@@ -204,8 +213,11 @@ static int
 free_frame_data_i(st_data_t frame, st_data_t _frame_data, st_data_t ctx)
 {
     frame_data_t * frame_data = (frame_data_t *)_frame_data;
-    st_free_table(frame_data->edges);
-    st_free_table(frame_data->lines);
+    if (frame_data->edges)
+	st_free_table(frame_data->edges);
+
+    if (frame_data->lines)
+	st_free_table(frame_data->lines);
     return ST_CONTINUE;
 }
 
@@ -382,11 +394,85 @@ disable(VALUE self)
 }
 
 static int
+frame_edges_i(st_data_t key, st_data_t val, st_data_t arg)
+{
+    VALUE edges = (VALUE)arg;
+
+    intptr_t weight = (intptr_t)val;
+    rb_hash_aset(edges, rb_obj_id((VALUE)key), INT2FIX(weight));
+    return ST_CONTINUE;
+}
+
+static int
+frame_lines_i(st_data_t key, st_data_t val, st_data_t arg)
+{
+    VALUE lines = (VALUE)arg;
+
+    size_t weight = (size_t)val;
+    size_t total = weight & (~(size_t)0 << (8*SIZEOF_SIZE_T/2));
+    weight -= total;
+    total = total >> (8*SIZEOF_SIZE_T/2);
+    rb_hash_aset(lines, INT2FIX(key), rb_ary_new3(2, ULONG2NUM(total), ULONG2NUM(weight)));
+    return ST_CONTINUE;
+}
+
+static int
+frame_i(st_data_t key, st_data_t val, st_data_t arg)
+{
+    VALUE frame = (VALUE)key;
+    frame_data_t *frame_data = (frame_data_t *)val;
+    VALUE results = (VALUE)arg;
+    VALUE details = rb_hash_new();
+    VALUE name, file, edges, lines;
+    VALUE line;
+
+    rb_hash_aset(results, rb_obj_id(frame), details);
+
+    name = rb_profile_frame_full_label(frame);
+
+    file = rb_profile_frame_absolute_path(frame);
+    if (NIL_P(file))
+	file = rb_profile_frame_path(frame);
+    line = rb_profile_frame_first_lineno(frame);
+
+    rb_hash_aset(details, sym_name, name);
+    rb_hash_aset(details, sym_file, file);
+    if (line != INT2FIX(0)) {
+	rb_hash_aset(details, sym_line, line);
+    }
+
+    rb_hash_aset(details, sym_total_samples, SIZET2NUM(frame_data->total_samples));
+    rb_hash_aset(details, sym_samples, SIZET2NUM(frame_data->caller_samples));
+
+    if (frame_data->edges) {
+	edges = rb_hash_new();
+	rb_hash_aset(details, sym_edges, edges);
+	st_foreach(frame_data->edges, frame_edges_i, (st_data_t)edges);
+    }
+
+    if (frame_data->lines) {
+	lines = rb_hash_new();
+	rb_hash_aset(details, sym_lines, lines);
+	st_foreach(frame_data->lines, frame_lines_i, (st_data_t)lines);
+    }
+
+    return ST_CONTINUE;
+}
+
+static int
 insert_line_to_ruby_hash(st_data_t line, st_data_t value, void *data)
 {
     VALUE rb_line_hash = (VALUE)data;
+    VALUE list = rb_ary_new();
+    VALUE frames = rb_hash_new();
+
     allocation_data_t * allocation_data = (allocation_data_t *)value;
-    rb_hash_aset(rb_line_hash, ULL2NUM((unsigned long)line), ULL2NUM(allocation_data->count));
+    rb_ary_push(list, ULL2NUM(allocation_data->count));
+    rb_ary_push(list, frames);
+
+    st_foreach(allocation_data->frames, frame_i, (st_data_t)frames);
+
+    rb_hash_aset(rb_line_hash, ULL2NUM((unsigned long)line), list);
     return ST_CONTINUE;
 }
 
@@ -419,6 +505,7 @@ result(VALUE self)
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
 
     result = rb_hash_new();
+
     st_foreach(stats->allocations, insert_class_to_ruby_hash, result);
 
     return result;
@@ -465,6 +552,16 @@ allocation_count(VALUE self)
 void
 Init_allocation_sampler(void)
 {
+#define S(name) sym_##name = ID2SYM(rb_intern(#name));
+    S(name);
+    S(file);
+    S(line);
+    S(lines);
+    S(total_samples);
+    S(samples);
+    S(edges);
+#undef S
+
     VALUE rb_mObjSpace = rb_const_get(rb_cObject, rb_intern("ObjectSpace"));
     rb_cAllocationSampler = rb_define_class_under(rb_mObjSpace, "AllocationSampler", rb_cObject);
     rb_define_alloc_func(rb_cAllocationSampler, allocate);
