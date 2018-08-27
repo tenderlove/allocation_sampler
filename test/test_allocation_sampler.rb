@@ -142,11 +142,10 @@ class TestAllocationSampler < Minitest::Test
       stack_printer.show frames
     end
     assert_equal <<-eoout, buffer.string
-TestAllocationSampler#d                                125 (100.0%)         125 (100.0%)
-`-- TestAllocationSampler#c                            125 (100.0%)           0   (0.0%)
-    `-- TestAllocationSampler#b                        125 (100.0%)           0   (0.0%)
-        `-- TestAllocationSampler#a                    125 (100.0%)           0   (0.0%)
-            `-- TestAllocationSampler#test_stack_trace 125 (100.0%)           0   (0.0%)
+TestAllocationSampler#d             125 (100.0%)         125 (100.0%)
+`-- TestAllocationSampler#c         125 (100.0%)           0   (0.0%)
+    `-- TestAllocationSampler#b     125 (100.0%)           0   (0.0%)
+        `-- TestAllocationSampler#a 125 (100.0%)           0   (0.0%)
     eoout
   end
 

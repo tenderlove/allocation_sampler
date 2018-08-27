@@ -91,7 +91,7 @@ module ObjectSpace
         private
 
         def too_deep? depth
-          max_depth != 0 && depth > max_depth
+          max_depth != 0 && depth > max_depth - 1
         end
 
         def max_width frame, incoming_edges, depth, seen
