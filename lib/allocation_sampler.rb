@@ -1,4 +1,6 @@
 require 'allocation_sampler.so'
+require 'delegate'
+
 module ObjectSpace
   class AllocationSampler
     VERSION = '1.0.0'
@@ -73,7 +75,14 @@ module ObjectSpace
     end
 
     module Display
-      class Stack
+      class Stack < DelegateClass(IO)
+        attr_reader :max_depth
+
+        def initialize output: $stdout, max_depth: 0
+          @max_depth = max_depth
+          super(output)
+        end
+
         def show frames
           max_width = max_width(frames.root, frames.incoming_edges, 0, {})
           display(frames.root, frames.incoming_edges, 0, frames.root[:samples], [], {}, max_width)
@@ -81,7 +90,12 @@ module ObjectSpace
 
         private
 
+        def too_deep? depth
+          max_depth != 0 && depth > max_depth
+        end
+
         def max_width frame, incoming_edges, depth, seen
+          return 0 if too_deep? depth
           return 0 if seen.key? frame[:id]
           seen[frame[:id]] = true
 
@@ -98,6 +112,7 @@ module ObjectSpace
         end
 
         def display frame, incoming_edges, depth, total_samples, last_stack, seen, max_width
+          return if too_deep? depth
           return if seen.key? frame[:id]
           seen[frame[:id]] = true
 
@@ -136,8 +151,6 @@ module ObjectSpace
         end
       end
     end
-
-    require 'delegate'
 
     class FramesCollection < DelegateClass(Array)
       attr_reader :root
