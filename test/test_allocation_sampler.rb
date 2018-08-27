@@ -62,7 +62,7 @@ class TestAllocationSampler < Minitest::Test
     iseq.eval
     as.disable
 
-    assert_equal({"Object"=>{"<compiled>"=>{2=>10, 3=>1}}}, as.result)
+    assert_equal({"Object"=>{"<compiled>"=>{2=>10, 3=>1}}}, filter(as.result))
   end
 
   def test_location_larger_interval
