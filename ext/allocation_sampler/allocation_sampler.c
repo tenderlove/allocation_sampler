@@ -32,7 +32,7 @@ digraph objects {
 */
 
 static VALUE sym_name, sym_file, sym_line, sym_total_samples, sym_samples;
-static VALUE sym_edges, sym_lines;
+static VALUE sym_edges, sym_lines, sym_root, sym_frames, sym_id;
 
 typedef struct {
     st_table * allocations;
@@ -114,7 +114,7 @@ st_numtable_increment(st_table *table, st_data_t key, size_t increment)
 }
 
 static int
-increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists)
+increment_line_count(st_data_t *frame, st_data_t *data, st_data_t arg, int exists)
 {
     allocation_data_t * allocation_data;
     frame_data_t * frame_data;
@@ -147,7 +147,6 @@ increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists
 	    if (!frame_data->edges)
 		frame_data->edges = st_init_numtable();
 
-	    frame_data->edges = st_init_numtable();
 	    st_numtable_increment(frame_data->edges, (st_data_t)prev_frame, 1);
 	}
 
@@ -170,43 +169,22 @@ increment_line_count(st_data_t *line, st_data_t *data, st_data_t arg, int exists
 }
 
 static int
-update_file_path_table(st_data_t *k, st_data_t *v, st_data_t arg, int exists)
-{
-    st_table * line_table;
-    char * filename;
-    size_t strlen;
-    update_args_t *args = (update_args_t *)arg;
-
-    if (exists) {
-	line_table = (st_table *)*v;
-    } else {
-	line_table = st_init_numtable();
-	*v = (st_data_t)line_table;
-
-	strlen = args->path_length;
-	filename = xmalloc(strlen + 1);
-	strncpy(filename, (char *)*k, strlen);
-	filename[strlen] = 0;
-	*k = (st_data_t)filename;
-    }
-
-    return st_update(line_table, args->line_number, increment_line_count, arg);
-}
-
-static int
 update_class_name_table(st_data_t *k, st_data_t *v, st_data_t arg, int exists)
 {
-    st_table * file_table;
+    st_table * top_frame_table;
     update_args_t *args = (update_args_t *)arg;
 
     if (exists) {
-	file_table = (st_table *)*v;
+	top_frame_table = (st_table *)*v;
     } else {
-	file_table = st_init_strtable();
-	*v = (st_data_t)file_table;
+	top_frame_table = st_init_numtable();
+	*v = (st_data_t)top_frame_table;
     }
 
-    return st_update(file_table, (st_data_t)args->path, update_file_path_table, arg);
+    VALUE frame = args->frames_buffer[0];
+
+    /* key frame, value stack */
+    return st_update(top_frame_table, (st_data_t)frame, increment_line_count, arg);
 }
 
 static int
@@ -222,7 +200,7 @@ free_frame_data_i(st_data_t frame, st_data_t _frame_data, st_data_t ctx)
 }
 
 static int
-free_allocation_data_i(st_data_t line_number, st_data_t allocation_data, st_data_t ctx)
+free_allocation_data_i(st_data_t frame, st_data_t allocation_data, st_data_t ctx)
 {
     allocation_data_t * allocation = (allocation_data_t *)allocation_data;
     st_foreach((st_table *)allocation->frames, free_frame_data_i, ctx);
@@ -232,20 +210,10 @@ free_allocation_data_i(st_data_t line_number, st_data_t allocation_data, st_data
 }
 
 static int
-free_line_tables_i(st_data_t path, st_data_t line_table, st_data_t ctx)
+free_top_frames_table_i(st_data_t classname, st_data_t tft, st_data_t ctx)
 {
-    /* line table only contains long => long, so nothing to free */
-    st_foreach((st_table *)line_table, free_allocation_data_i, ctx);
-    st_free_table((st_table *)line_table);
-    xfree((char *)path);
-    return ST_CONTINUE;
-}
-
-static int
-free_path_tables_i(st_data_t classpath, st_data_t path_table, st_data_t ctx)
-{
-    st_foreach((st_table *)path_table, free_line_tables_i, ctx);
-    st_free_table((st_table *)path_table);
+    st_foreach((st_table *)tft, free_allocation_data_i, ctx);
+    st_free_table((st_table *)tft);
     return ST_CONTINUE;
 }
 
@@ -253,7 +221,7 @@ static void
 dealloc(void *ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
-    st_foreach(stats->allocations, free_path_tables_i, (st_data_t)stats);
+    st_foreach(stats->allocations, free_top_frames_table_i, (st_data_t)stats);
     st_free_table(stats->allocations);
     xfree(stats);
 }
@@ -266,28 +234,24 @@ mark_frames_table_i(st_data_t key, st_data_t value, void *data)
 }
 
 static int
-mark_line_table_i(st_data_t key, st_data_t value, void *data)
+mark_top_frames_table_i(st_data_t key, st_data_t value, void *data)
 {
+    VALUE top_frame = (VALUE)key;
     allocation_data_t * allocation = (allocation_data_t *)value;
-    st_foreach(allocation->frames, mark_frames_table_i, (st_data_t)data);
-    return ST_CONTINUE;
-}
 
-static int
-mark_file_table_i(st_data_t key, st_data_t value, void *data)
-{
-    st_table * line_table = (st_table *)value;
-    st_foreach(line_table, mark_line_table_i, (st_data_t)data);
+    rb_gc_mark(key);
+    st_foreach(allocation->frames, mark_frames_table_i, (st_data_t)data);
+
     return ST_CONTINUE;
 }
 
 static int
 mark_class_table_i(st_data_t key, st_data_t value, void *data)
 {
-    st_table * file_table = (st_table *)value;
+    st_table * top_frames_table = (st_table *)value;
 
     rb_gc_mark((VALUE)key);
-    st_foreach(file_table, mark_file_table_i, (st_data_t)data);
+    st_foreach(top_frames_table, mark_top_frames_table_i, (st_data_t)data);
     return ST_CONTINUE;
 }
 
@@ -437,6 +401,7 @@ frame_i(st_data_t key, st_data_t val, st_data_t arg)
 
     rb_hash_aset(details, sym_name, name);
     rb_hash_aset(details, sym_file, file);
+    rb_hash_aset(details, sym_id, rb_obj_id(frame));
     if (line != INT2FIX(0)) {
 	rb_hash_aset(details, sym_line, line);
     }
@@ -460,39 +425,30 @@ frame_i(st_data_t key, st_data_t val, st_data_t arg)
 }
 
 static int
-insert_line_to_ruby_hash(st_data_t line, st_data_t value, void *data)
+insert_top_frame_to_ruby_hash(st_data_t frame, st_data_t value, void *data)
 {
-    VALUE rb_line_hash = (VALUE)data;
-    VALUE list = rb_ary_new();
+    VALUE top_frames_list = (VALUE)data;
+    VALUE top_frame = rb_hash_new();
     VALUE frames = rb_hash_new();
-
     allocation_data_t * allocation_data = (allocation_data_t *)value;
-    rb_ary_push(list, ULL2NUM(allocation_data->count));
-    rb_ary_push(list, frames);
+
+    rb_ary_push(top_frames_list, top_frame);
+
+    rb_hash_aset(top_frame, sym_root, rb_obj_id(frame));
+
+    rb_hash_aset(top_frame, sym_frames, frames);
 
     st_foreach(allocation_data->frames, frame_i, (st_data_t)frames);
-
-    rb_hash_aset(rb_line_hash, ULL2NUM((unsigned long)line), list);
     return ST_CONTINUE;
 }
 
 static int
-insert_path_to_ruby_hash(st_data_t path, st_data_t linetable, void *data)
-{
-    VALUE rb_path_hash = (VALUE)data;
-    VALUE line_hash = rb_hash_new();
-    rb_hash_aset(rb_path_hash, rb_str_new2((char *)path), line_hash);
-    st_foreach((st_table *)linetable, insert_line_to_ruby_hash, line_hash);
-    return ST_CONTINUE;
-}
-
-static int
-insert_class_to_ruby_hash(st_data_t classname, st_data_t pathtable, void *data)
+insert_class_to_ruby_hash(st_data_t classname, st_data_t top_frame_table, void *data)
 {
     VALUE rb_hash = (VALUE)data;
-    VALUE path_hash = rb_hash_new();
-    rb_hash_aset(rb_hash, (VALUE)classname, path_hash);
-    st_foreach((st_table *)pathtable, insert_path_to_ruby_hash, path_hash);
+    VALUE top_frames_list = rb_ary_new();
+    rb_hash_aset(rb_hash, (VALUE)classname, top_frames_list);
+    st_foreach((st_table *)top_frame_table, insert_top_frame_to_ruby_hash, top_frames_list);
     return ST_CONTINUE;
 }
 
@@ -549,6 +505,14 @@ allocation_count(VALUE self)
     return INT2NUM(stats->allocation_count);
 }
 
+static VALUE
+overall_samples(VALUE self)
+{
+    trace_stats_t * stats;
+    TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
+    return INT2NUM(stats->overall_samples);
+}
+
 void
 Init_allocation_sampler(void)
 {
@@ -560,6 +524,9 @@ Init_allocation_sampler(void)
     S(total_samples);
     S(samples);
     S(edges);
+    S(frames);
+    S(root);
+    S(id);
 #undef S
 
     VALUE rb_mObjSpace = rb_const_get(rb_cObject, rb_intern("ObjectSpace"));
@@ -571,4 +538,5 @@ Init_allocation_sampler(void)
     rb_define_method(rb_cAllocationSampler, "result", result, 0);
     rb_define_method(rb_cAllocationSampler, "interval", interval, 0);
     rb_define_method(rb_cAllocationSampler, "allocation_count", allocation_count, 0);
+    rb_define_method(rb_cAllocationSampler, "overall_samples", overall_samples, 0);
 }

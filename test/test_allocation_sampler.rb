@@ -94,6 +94,16 @@ class TestAllocationSampler < Minitest::Test
     assert_equal(2, filter(as.result)[Object.name].values.flat_map(&:values).inject(:+))
   end
 
+  def test_two_with_same_type_same_line
+    as = ObjectSpace::AllocationSampler.new
+    as.enable
+    Object.new; Object.new
+    Object.new; Object.new
+    as.disable
+
+    assert_equal(4, filter(as.result)[Object.name].values.flat_map(&:values).inject(:+))
+  end
+
   class X
   end
 
@@ -111,39 +121,101 @@ class TestAllocationSampler < Minitest::Test
     assert_equal(500, filter(as.result)[TestAllocationSampler::X.name].values.flat_map(&:values).inject(:+))
   end
 
-  def d; Object.new; end
-  def c2; 5.times { d }; end
+  def d
+    Object.new
+  end
+  def c2; 5.times { d } end
   def c;  5.times { d }; end
   def b;  50.times { rand < 0.5 ? c : c2 }; end
   def a;  5.times { b }; end
+
+  def max_width frame, incoming_edges, depth, seen
+    return 0 if seen.key? frame[:id]
+    seen[frame[:id]] = true
+
+    my_length = (depth * 4) + frame[:name].length
+
+    callers = (incoming_edges[frame[:id]] || [])
+
+    callers.each do |caller|
+      child_len = max_width caller, incoming_edges, depth + 1, seen
+      my_length = child_len if my_length < child_len
+    end
+
+    my_length
+  end
+
+  def display frame, incoming_edges, depth, total_samples, last_stack, seen, max_width
+    return if seen.key? frame[:id]
+    seen[frame[:id]] = true
+
+    buffer = max_width - ((depth * 4) + frame[:name].length)
+
+    call, total = frame.values_at(:samples, :total_samples)
+    last_stack.each_with_index do |last, i|
+      if i == last_stack.length - 1
+        if last
+          printf "`-- "
+        else
+          printf "|-- "
+        end
+      else
+        if last
+          printf "    "
+        else
+          printf "|   "
+        end
+      end
+    end
+
+
+    printf frame[:name]
+    #printf " " * buffer
+    #printf "% d % 8s  % 10d % 8s", total, "(%2.1f%%)" % (total*100.0/total_samples), call, "(%2.1f%%)" % (call*100.0/total_samples)
+    puts
+    callers = (incoming_edges[frame[:id]] || []).sort_by { |frame|
+      -frame[:total_samples]
+    }
+
+    callers.each_with_index do |caller, i|
+      s = last_stack + [i == callers.length - 1]
+      display caller, incoming_edges, depth + 1, total_samples, s, seen, max_width
+    end
+  end
 
   def test_stack_trace
     as = ObjectSpace::AllocationSampler.new
     as.enable
     a
     as.disable
-    result = as.result
-    result.each_pair do |class_name, path_hash|
-      path_hash.each_pair do |path_name, line_hash|
-        line_hash.each_pair do |line, (count, frames)|
-          p [class_name, path_name, line, count]
-          frames.sort_by { |_, stats| stats[:samples] }.reverse_each do |frame, info|
-            p info
-            call, total = info[:samples], info[:total_samples]
-            printf "% 10d % 8s  % 10d % 8s     %s\n", total, "(%2.1f%%)" % (total*100.0/count), call, "(%2.1f%%)" % (call*100.0/count), info[:name]
-          end
+    as.heaviest_types_by_file_and_line.each do |count, class_name, root, file, line, frames|
+      incoming_edges = {}
+      frames.each do |frame|
+        if frame[:edges]
+          frame[:edges].keys.each { |k| (incoming_edges[k] ||= []) << frame }
         end
       end
+
+      puts
+      puts "=================================="
+      puts "#{class_name}: #{file}:#{line}"
+      puts "=================================="
+      max_width = max_width(root, incoming_edges, 0, {})
+      display(root, incoming_edges, 0, root[:samples], [], {}, max_width)
     end
   end
 
   private
 
   def filter result
-    result.each_with_object({}) do |(k,v), a|
-      a[k] = v.each_with_object({}) do |(k2,v2), b|
-        b[k2] = v2.each_with_object({}) do |(k3, v3), c|
-          c[k3] = v3.first
+    result.each_with_object({}) do |(k, top_frames), a|
+      file_table = a[k] ||= {}
+
+      top_frames.each do |top_frame_info|
+        top_frame = top_frame_info[:frames][top_frame_info[:root]]
+        line_table = file_table[top_frame[:file]] ||= {}
+        top_frame[:lines].each do |line, (_, count)|
+          line_table[line] = count
         end
       end
     end
