@@ -49,6 +49,22 @@ class TestAllocationSampler < Minitest::Test
     assert_equal({"Object"=>{"<compiled>"=>{1=>10, 2=>1}}}, as.result)
   end
 
+  def test_location_from_method
+    iseq = RubyVM::InstructionSequence.new <<-eoruby
+    def foo
+      10.times { Object.new }
+      Object.new
+    end
+    foo
+    eoruby
+    as = ObjectSpace::AllocationSampler.new(interval: 1)
+    as.enable
+    iseq.eval
+    as.disable
+
+    assert_equal({"Object"=>{"<compiled>"=>{2=>10, 3=>1}}}, as.result)
+  end
+
   def test_location_larger_interval
     iseq = RubyVM::InstructionSequence.new <<-eom
     100.times { Object.new }
