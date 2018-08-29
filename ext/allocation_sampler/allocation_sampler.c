@@ -32,9 +32,6 @@ digraph objects {
 }
 */
 
-static VALUE sym_name, sym_file, sym_line, sym_total_samples, sym_samples;
-static VALUE sym_edges, sym_lines, sym_root, sym_frames, sym_id;
-
 typedef struct {
     VALUE *samples;
     size_t capa;
@@ -53,6 +50,37 @@ typedef struct {
     VALUE newobj_hook;
 } trace_stats_t;
 
+typedef struct {
+    sample_buffer_t * frames;
+    sample_buffer_t * lines;
+} compare_data_t;
+
+static void
+free_sample_buffer(sample_buffer_t *buffer)
+{
+    xfree(buffer->samples);
+    xfree(buffer);
+}
+
+static sample_buffer_t *
+alloc_sample_buffer(size_t size)
+{
+    sample_buffer_t * samples = xcalloc(sizeof(sample_buffer_t), 1);
+    samples->samples = xcalloc(sizeof(VALUE), size);
+    samples->capa = size;
+    return samples;
+}
+
+static void
+ensure_sample_buffer_capa(sample_buffer_t * buffer, size_t size)
+{
+    /* If we can't fit all the samples in the buffer, double the buffer size. */
+    while (buffer->capa <= (buffer->next_free - 1) + (size + 2)) {
+	buffer->capa *= 2;
+	buffer->samples = xrealloc(buffer->samples, sizeof(VALUE) * buffer->capa);
+    }
+}
+
 static void
 dealloc(void *ptr)
 {
@@ -64,44 +92,37 @@ dealloc(void *ptr)
     lines = stats->lines_samples;
 
     if (frames && lines) {
-	xfree(stats->stack_samples->samples);
-	xfree(stats->stack_samples);
-	xfree(stats->lines_samples->samples);
-	xfree(stats->lines_samples);
+	free_sample_buffer(frames);
+	free_sample_buffer(lines);
     }
     xfree(stats);
 }
 
-static void
-dump_buffer(sample_buffer_t * buffer)
+static VALUE
+make_frame_info(VALUE *frames, VALUE *lines)
 {
-    VALUE * frame = buffer->samples;
+    size_t count, i;
+    VALUE rb_frames;
 
-    while(frame < buffer->samples + buffer->next_free) {
-	size_t stack_size;
-	VALUE * head;
+    count = *frames;
+    frames++;
+    lines++;
 
-	stack_size = *frame;
-	printf("#########\n");
-	printf("Stack size: %d\n", stack_size);
-	frame++; /* First element is the stack size */
-	head = frame;
+    rb_frames = rb_ary_new_capa(count);
 
-	for(; frame < (head + stack_size); frame++) {
-	    printf("frame: %p\n", *frame);
-	}
-	frame++; /* Frame info */
-	printf("type: \n");
-	rb_p(*frame);
-	printf("#########\n");
-	frame++; /* Next Head */
+    for(i = 0; i < count; i++, frames++, lines++) {
+	rb_ary_push(rb_frames, rb_ary_new3(2, rb_obj_id(*frames), INT2NUM(*lines)));
     }
+
+    return rb_frames;
 }
 
 static int
 compare(void *ctx, size_t * l, size_t * r)
 {
-    sample_buffer_t *stacks = (sample_buffer_t *)ctx;
+    compare_data_t *compare_data = (compare_data_t *)ctx;
+    sample_buffer_t *stacks = compare_data->frames;
+    sample_buffer_t *lines = compare_data->lines;
 
     size_t left_offset = *l;
     size_t right_offset = *r;
@@ -112,7 +133,11 @@ compare(void *ctx, size_t * l, size_t * r)
     if (lstack == rstack) {
 	/* Compare the stack plus type info */
 	int stack_cmp = memcmp(stacks->samples + left_offset, stacks->samples + right_offset, (lstack + 3) * sizeof(VALUE *));
-	return stack_cmp;
+	if (stack_cmp == 0) {
+	    return memcmp(lines->samples + left_offset, lines->samples + right_offset, (lstack + 3) * sizeof(VALUE *));
+	} else {
+	    return stack_cmp;
+	}
     } else {
 	if (lstack < rstack) {
 	    return -1;
@@ -166,25 +191,6 @@ user_class(VALUE klass, VALUE obj)
 	return rb_class_path_cached(rb_class_real(klass));
     } else {
 	return Qnil;
-    }
-}
-
-static sample_buffer_t *
-alloc_sample_buffer(size_t size)
-{
-    sample_buffer_t * samples = xcalloc(sizeof(sample_buffer_t), 1);
-    samples->samples = xcalloc(sizeof(VALUE), size);
-    samples->capa = size;
-    return samples;
-}
-
-static void
-ensure_sample_buffer_capa(sample_buffer_t * buffer, size_t size)
-{
-    /* If we can't fit all the samples in the buffer, double the buffer size. */
-    while (buffer->capa <= (buffer->next_free - 1) + (size + 2)) {
-	buffer->capa *= 2;
-	buffer->samples = xrealloc(buffer->samples, sizeof(VALUE) * buffer->capa);
     }
 }
 
@@ -281,13 +287,26 @@ disable(VALUE self)
 }
 
 static VALUE
-result(VALUE self)
+frames(VALUE self)
+{
+    trace_stats_t * stats;
+    VALUE frames;
+
+    TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
+
+    frames = rb_hash_new();
+
+    return frames;
+}
+
+static VALUE
+samples(VALUE self)
 {
     trace_stats_t * stats;
     sample_buffer_t * frames;
     sample_buffer_t * lines;
     size_t *record_offsets;
-    VALUE result;
+    VALUE result = Qnil;
 
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
 
@@ -295,45 +314,63 @@ result(VALUE self)
     lines = stats->lines_samples;
 
     if (frames && lines) {
-	printf("record count %d\n", frames->record_count);
-	size_t i = 0;
-	VALUE * frame = frames->samples;
-
+	size_t i, j;
 	size_t * head;
+	VALUE * frame = frames->samples;
+	compare_data_t compare_ctx;
+	compare_ctx.frames = frames;
+	compare_ctx.lines = lines;
+
 	record_offsets = xcalloc(sizeof(size_t), frames->record_count);
 	head = record_offsets;
 
+	i = 0;
 	while(frame < frames->samples + frames->next_free) {
-	    *head = i;
-	    head++;
+	    *head = i;             /* Store the frame start offset */
+	    head++;                /* Move to the next entry in record_offsets */
 	    i     += (*frame + 3); /* Increase the offset */
 	    frame += (*frame + 3); /* Move to the next frame */
 	}
 
-	qsort_r(record_offsets, frames->record_count, sizeof(size_t), frames, compare);
+	qsort_r(record_offsets, frames->record_count, sizeof(size_t), &compare_ctx, compare);
 
-	for(i = 0; i < frames->record_count; i++) {
-	    printf("afte offset %d\n", record_offsets[i]);
-	    VALUE * head = frames->samples + record_offsets[i];
-	    size_t stack_size = (size_t)*head;
-	    printf("stack size %d\n", stack_size);
-	    rb_p(*(head + stack_size + 2));
-	}
+	VALUE unique_frames = rb_ary_new();
 
 	for(i = 0; i < frames->record_count; ) {
-	    printf("afte offset %d\n", record_offsets[i]);
-	    VALUE * head = frames->samples + record_offsets[i];
-	    size_t stack_size = (size_t)*head;
-	    printf("stack size %d\n", stack_size);
-	    rb_p(*(head + stack_size + 2));
+	    size_t current = record_offsets[i];
+	    size_t count = 0;
+
+	    /* Count any duplicate stacks ahead of us in the array */
+	    for (j = i+1; j < frames->record_count; j++) {
+		size_t next = record_offsets[j];
+		int same = compare(&compare_ctx, &current, &next);
+
+		if (same == 0) {
+		    count++;
+		} else {
+		    break;
+		}
+	    }
+
+	    i = j;
+
+	    size_t stack_size = *(frames->samples + current);
+
+	    VALUE type = *(frames->samples + current + stack_size + 2);
+
+	    rb_ary_push(unique_frames,
+		    rb_ary_new3(3,
+			type,
+			INT2NUM(count + 1),
+			make_frame_info(frames->samples + current, lines->samples + current)));
+
 	}
 
 	xfree(record_offsets);
 
-	result = rb_hash_new();
-    } else {
-	result = Qnil;
+	result = unique_frames;
     }
+
     return result;
 }
 
@@ -386,26 +423,14 @@ overall_samples(VALUE self)
 void
 Init_allocation_sampler(void)
 {
-#define S(name) sym_##name = ID2SYM(rb_intern(#name));
-    S(name);
-    S(file);
-    S(line);
-    S(lines);
-    S(total_samples);
-    S(samples);
-    S(edges);
-    S(frames);
-    S(root);
-    S(id);
-#undef S
-
     VALUE rb_mObjSpace = rb_const_get(rb_cObject, rb_intern("ObjectSpace"));
     rb_cAllocationSampler = rb_define_class_under(rb_mObjSpace, "AllocationSampler", rb_cObject);
     rb_define_alloc_func(rb_cAllocationSampler, allocate);
     rb_define_method(rb_cAllocationSampler, "initialize", initialize, -1);
     rb_define_method(rb_cAllocationSampler, "enable", enable, 0);
     rb_define_method(rb_cAllocationSampler, "disable", disable, 0);
-    rb_define_method(rb_cAllocationSampler, "result", result, 0);
+    rb_define_method(rb_cAllocationSampler, "frames", frames, 0);
+    rb_define_method(rb_cAllocationSampler, "samples", samples, 0);
     rb_define_method(rb_cAllocationSampler, "interval", interval, 0);
     rb_define_method(rb_cAllocationSampler, "allocation_count", allocation_count, 0);
     rb_define_method(rb_cAllocationSampler, "overall_samples", overall_samples, 0);
