@@ -1,6 +1,7 @@
 #include <ruby/ruby.h>
 #include <ruby/debug.h>
 #include <ruby/st.h>
+#include <stdlib.h>
 
 /*
 digraph objects {
@@ -35,232 +36,118 @@ static VALUE sym_name, sym_file, sym_line, sym_total_samples, sym_samples;
 static VALUE sym_edges, sym_lines, sym_root, sym_frames, sym_id;
 
 typedef struct {
+    VALUE *samples;
+    size_t capa;
+    size_t next_free;
+    size_t prev_free;
+    size_t record_count;
+} sample_buffer_t;
+
+typedef struct {
     st_table * allocations;
     size_t interval;
     size_t allocation_count;
     size_t overall_samples;
+    sample_buffer_t * stack_samples;
+    sample_buffer_t * lines_samples;
     VALUE newobj_hook;
 } trace_stats_t;
-
-typedef struct {
-    unsigned long count;
-    st_table *frames;
-} allocation_data_t;
-
-typedef struct {
-    unsigned long line_number;
-    size_t path_length;
-    char * path;
-    VALUE * frames_buffer;
-    int * lines_buffer;
-    int frame_count;
-    size_t overall_samples;
-} update_args_t;
-
-typedef struct {
-    size_t total_samples;
-    size_t caller_samples;
-    size_t seen_at_sample_number;
-    st_table *edges;
-    st_table *lines;
-} frame_data_t;
-
-static allocation_data_t *
-make_allocation_data(void)
-{
-    allocation_data_t * allocation;
-
-    allocation = (allocation_data_t *)xcalloc(1, sizeof(allocation_data_t));
-    allocation->frames = st_init_numtable();
-    return allocation;
-}
-
-static frame_data_t *
-sample_for(allocation_data_t * allocation, VALUE frame)
-{
-    st_data_t key = (st_data_t)frame, val = 0;
-    frame_data_t *frame_data;
-
-    if (st_lookup(allocation->frames, key, &val)) {
-        frame_data = (frame_data_t *)val;
-    } else {
-        frame_data = xcalloc(1, sizeof(frame_data_t));
-
-        val = (st_data_t)frame_data;
-        st_insert(allocation->frames, key, val);
-    }
-
-    return frame_data;
-}
-
-static int
-numtable_increment_callback(st_data_t *key, st_data_t *value, st_data_t arg, int existing)
-{
-    size_t *weight = (size_t *)value;
-    size_t increment = (size_t)arg;
-
-    if (existing)
-	(*weight) += increment;
-    else
-	*weight = increment;
-
-    return ST_CONTINUE;
-}
-
-void
-st_numtable_increment(st_table *table, st_data_t key, size_t increment)
-{
-    st_update(table, key, numtable_increment_callback, (st_data_t)increment);
-}
-
-static int
-increment_line_count(st_data_t *frame, st_data_t *data, st_data_t arg, int exists)
-{
-    allocation_data_t * allocation_data;
-    frame_data_t * frame_data;
-    int i;
-    update_args_t *args = (update_args_t *)arg;
-
-    if (exists) {
-	allocation_data = (allocation_data_t *)*data;
-    } else {
-	allocation_data = make_allocation_data();
-	*data = (st_data_t)allocation_data;
-    }
-
-    VALUE prev_frame;
-
-    for(i = 0; i < args->frame_count; i++) {
-	int line = args->lines_buffer[i];
-	VALUE frame = args->frames_buffer[i];
-	frame_data_t * frame_data = sample_for(allocation_data, frame);
-
-	/* Don't count the same frame in a stack twice */
-	if (frame_data->seen_at_sample_number != args->overall_samples) {
-	    frame_data->total_samples++;
-	}
-	frame_data->seen_at_sample_number = args->overall_samples;
-
-	if (i == 0) {
-	    frame_data->caller_samples++;
-	} else {
-	    if (!frame_data->edges)
-		frame_data->edges = st_init_numtable();
-
-	    st_numtable_increment(frame_data->edges, (st_data_t)prev_frame, 1);
-	}
-
-	if (line > 0) {
-	    /* Lower half is when the frame is at the top of the stack,
-	     * upper half is non-top level frames */
-	    size_t half = (size_t)1<<(8*SIZEOF_SIZE_T/2);
-	    size_t increment = i == 0 ? half + 1 : half;
-
-	    if (!frame_data->lines)
-		frame_data->lines = st_init_numtable();
-
-	    st_numtable_increment(frame_data->lines, (st_data_t)line, increment);
-	}
-	prev_frame = frame;
-    }
-
-    allocation_data->count++;
-    return ST_CONTINUE;
-}
-
-static int
-update_class_name_table(st_data_t *k, st_data_t *v, st_data_t arg, int exists)
-{
-    st_table * top_frame_table;
-    update_args_t *args = (update_args_t *)arg;
-
-    if (exists) {
-	top_frame_table = (st_table *)*v;
-    } else {
-	top_frame_table = st_init_numtable();
-	*v = (st_data_t)top_frame_table;
-    }
-
-    VALUE frame = args->frames_buffer[0];
-
-    /* key frame, value stack */
-    return st_update(top_frame_table, (st_data_t)frame, increment_line_count, arg);
-}
-
-static int
-free_frame_data_i(st_data_t frame, st_data_t _frame_data, st_data_t ctx)
-{
-    frame_data_t * frame_data = (frame_data_t *)_frame_data;
-    if (frame_data->edges)
-	st_free_table(frame_data->edges);
-
-    if (frame_data->lines)
-	st_free_table(frame_data->lines);
-    return ST_CONTINUE;
-}
-
-static int
-free_allocation_data_i(st_data_t frame, st_data_t allocation_data, st_data_t ctx)
-{
-    allocation_data_t * allocation = (allocation_data_t *)allocation_data;
-    st_foreach((st_table *)allocation->frames, free_frame_data_i, ctx);
-    st_free_table(allocation->frames);
-    xfree(allocation);
-    return ST_CONTINUE;
-}
-
-static int
-free_top_frames_table_i(st_data_t classname, st_data_t tft, st_data_t ctx)
-{
-    st_foreach((st_table *)tft, free_allocation_data_i, ctx);
-    st_free_table((st_table *)tft);
-    return ST_CONTINUE;
-}
 
 static void
 dealloc(void *ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
-    st_foreach(stats->allocations, free_top_frames_table_i, (st_data_t)stats);
-    st_free_table(stats->allocations);
+    sample_buffer_t * frames;
+    sample_buffer_t * lines;
+
+    frames = stats->stack_samples;
+    lines = stats->lines_samples;
+
+    if (frames && lines) {
+	xfree(stats->stack_samples->samples);
+	xfree(stats->stack_samples);
+	xfree(stats->lines_samples->samples);
+	xfree(stats->lines_samples);
+    }
     xfree(stats);
 }
 
-static int
-mark_frames_table_i(st_data_t key, st_data_t value, void *data)
+static void
+dump_buffer(sample_buffer_t * buffer)
 {
-    rb_gc_mark((VALUE)key); /* Mark the frame */
-    return ST_CONTINUE;
+    VALUE * frame = buffer->samples;
+
+    while(frame < buffer->samples + buffer->next_free) {
+	size_t stack_size;
+	VALUE * head;
+
+	stack_size = *frame;
+	printf("#########\n");
+	printf("Stack size: %d\n", stack_size);
+	frame++; /* First element is the stack size */
+	head = frame;
+
+	for(; frame < (head + stack_size); frame++) {
+	    printf("frame: %p\n", *frame);
+	}
+	frame++; /* Frame info */
+	printf("type: \n");
+	rb_p(*frame);
+	printf("#########\n");
+	frame++; /* Next Head */
+    }
 }
 
 static int
-mark_top_frames_table_i(st_data_t key, st_data_t value, void *data)
+compare(void *ctx, size_t * l, size_t * r)
 {
-    VALUE top_frame = (VALUE)key;
-    allocation_data_t * allocation = (allocation_data_t *)value;
+    sample_buffer_t *stacks = (sample_buffer_t *)ctx;
 
-    rb_gc_mark(key);
-    st_foreach(allocation->frames, mark_frames_table_i, (st_data_t)data);
+    size_t left_offset = *l;
+    size_t right_offset = *r;
 
-    return ST_CONTINUE;
-}
+    size_t lstack = *(stacks->samples + left_offset);
+    size_t rstack = *(stacks->samples + right_offset);
 
-static int
-mark_class_table_i(st_data_t key, st_data_t value, void *data)
-{
-    st_table * top_frames_table = (st_table *)value;
-
-    rb_gc_mark((VALUE)key);
-    st_foreach(top_frames_table, mark_top_frames_table_i, (st_data_t)data);
-    return ST_CONTINUE;
+    if (lstack == rstack) {
+	/* Compare the stack plus type info */
+	int stack_cmp = memcmp(stacks->samples + left_offset, stacks->samples + right_offset, (lstack + 3) * sizeof(VALUE *));
+	return stack_cmp;
+    } else {
+	if (lstack < rstack) {
+	    return -1;
+	} else {
+	    return 1;
+	}
+    }
 }
 
 static void
 mark(void * ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
+    sample_buffer_t * stacks;
+
+    stacks = stats->stack_samples;
+
+    VALUE * frame = stacks->samples;
+
+    while(frame < stacks->samples + stacks->next_free) {
+	size_t stack_size;
+	VALUE * head;
+
+	stack_size = *frame;
+	frame++; /* First element is the stack size */
+	head = frame;
+
+	for(; frame < (head + stack_size); frame++) {
+	    rb_gc_mark(*frame);
+	}
+	frame++; /* Frame info */
+	rb_gc_mark(*frame);
+	frame++; /* Next Head */
+    }
     rb_gc_mark(stats->newobj_hook);
-    st_foreach(stats->allocations, mark_class_table_i, (st_data_t)stats);
 }
 
 static const rb_data_type_t trace_stats_type = {
@@ -282,6 +169,25 @@ user_class(VALUE klass, VALUE obj)
     }
 }
 
+static sample_buffer_t *
+alloc_sample_buffer(size_t size)
+{
+    sample_buffer_t * samples = xcalloc(sizeof(sample_buffer_t), 1);
+    samples->samples = xcalloc(sizeof(VALUE), size);
+    samples->capa = size;
+    return samples;
+}
+
+static void
+ensure_sample_buffer_capa(sample_buffer_t * buffer, size_t size)
+{
+    /* If we can't fit all the samples in the buffer, double the buffer size. */
+    while (buffer->capa <= (buffer->next_free - 1) + (size + 2)) {
+	buffer->capa *= 2;
+	buffer->samples = xrealloc(buffer->samples, sizeof(VALUE) * buffer->capa);
+    }
+}
+
 #define BUF_SIZE 2048
 
 static void
@@ -297,7 +203,6 @@ newobj(VALUE tpval, void *ptr)
 
 	if (!NIL_P(uc)) {
 	    unsigned long count;
-	    allocation_data_t * allocation_data;
 	    VALUE frames_buffer[BUF_SIZE];
 	    int lines_buffer[BUF_SIZE];
 	    int num;
@@ -306,17 +211,37 @@ newobj(VALUE tpval, void *ptr)
 	    VALUE line = rb_tracearg_lineno(tparg);
 
 	    if (RTEST(path)) {
-		update_args_t args;
+		sample_buffer_t * stack_samples;
+		sample_buffer_t * lines_samples;
+
+		int num = rb_profile_frames(0, sizeof(frames_buffer) / sizeof(VALUE), frames_buffer, lines_buffer);
+		if (!stats->stack_samples) {
+		    stats->stack_samples = alloc_sample_buffer(num * 100);
+		    stats->lines_samples = alloc_sample_buffer(num * 100);
+		}
+		stack_samples = stats->stack_samples;
+		lines_samples = stats->lines_samples;
+
+		ensure_sample_buffer_capa(stack_samples, num + 2);
+		ensure_sample_buffer_capa(lines_samples, num + 2);
+
+		stack_samples->prev_free = stack_samples->next_free;
+		lines_samples->prev_free = lines_samples->next_free;
+
+		stack_samples->samples[stack_samples->next_free] = (VALUE)num;
+		lines_samples->samples[lines_samples->next_free] = (VALUE)num;
+
+		memcpy(stack_samples->samples + stack_samples->next_free + 1, frames_buffer, num * sizeof(VALUE *));
+		memcpy(lines_samples->samples + lines_samples->next_free + 1, lines_buffer, num * sizeof(int));
+
+		stack_samples->samples[stack_samples->next_free + num + 2] = uc;
+		stack_samples->next_free += (num + 3);
+		lines_samples->next_free += (num + 3);
+
+		stack_samples->record_count++;
+		lines_samples->record_count++;
 
 		stats->overall_samples++;
-		args.overall_samples = stats->overall_samples;
-		args.frame_count     = rb_profile_frames(0, sizeof(frames_buffer) / sizeof(VALUE), frames_buffer, lines_buffer);
-		args.line_number     = NUM2ULL(line);
-		args.path            = RSTRING_PTR(path);
-		args.path_length     = RSTRING_LEN(path);
-		args.frames_buffer   = frames_buffer;
-		args.lines_buffer    = lines_buffer;
-		st_update(stats->allocations, (st_data_t)uc, update_class_name_table, (st_data_t)&args);
 	    }
 	}
     }
@@ -327,11 +252,9 @@ static VALUE
 allocate(VALUE klass)
 {
     trace_stats_t * stats;
-    stats = xmalloc(sizeof(trace_stats_t));
+    stats = xcalloc(sizeof(trace_stats_t), 1);
     stats->allocations = st_init_numtable();;
     stats->interval = 1;
-    stats->allocation_count = 0;
-    stats->overall_samples = 0;
     stats->newobj_hook = rb_tracepoint_new(0, RUBY_INTERNAL_EVENT_NEWOBJ, newobj, stats);
 
     return TypedData_Wrap_Struct(klass, &trace_stats_type, stats);
@@ -357,113 +280,60 @@ disable(VALUE self)
     return Qnil;
 }
 
-static int
-frame_edges_i(st_data_t key, st_data_t val, st_data_t arg)
-{
-    VALUE edges = (VALUE)arg;
-
-    intptr_t weight = (intptr_t)val;
-    rb_hash_aset(edges, rb_obj_id((VALUE)key), INT2FIX(weight));
-    return ST_CONTINUE;
-}
-
-static int
-frame_lines_i(st_data_t key, st_data_t val, st_data_t arg)
-{
-    VALUE lines = (VALUE)arg;
-
-    size_t weight = (size_t)val;
-    size_t total = weight & (~(size_t)0 << (8*SIZEOF_SIZE_T/2));
-    weight -= total;
-    total = total >> (8*SIZEOF_SIZE_T/2);
-    rb_hash_aset(lines, INT2FIX(key), rb_ary_new3(2, ULONG2NUM(total), ULONG2NUM(weight)));
-    return ST_CONTINUE;
-}
-
-static int
-frame_i(st_data_t key, st_data_t val, st_data_t arg)
-{
-    VALUE frame = (VALUE)key;
-    frame_data_t *frame_data = (frame_data_t *)val;
-    VALUE results = (VALUE)arg;
-    VALUE details = rb_hash_new();
-    VALUE name, file, edges, lines;
-    VALUE line;
-
-    rb_hash_aset(results, rb_obj_id(frame), details);
-
-    name = rb_profile_frame_full_label(frame);
-
-    file = rb_profile_frame_absolute_path(frame);
-    if (NIL_P(file))
-	file = rb_profile_frame_path(frame);
-    line = rb_profile_frame_first_lineno(frame);
-
-    rb_hash_aset(details, sym_name, name);
-    rb_hash_aset(details, sym_file, file);
-    rb_hash_aset(details, sym_id, rb_obj_id(frame));
-    if (line != INT2FIX(0)) {
-	rb_hash_aset(details, sym_line, line);
-    }
-
-    rb_hash_aset(details, sym_total_samples, SIZET2NUM(frame_data->total_samples));
-    rb_hash_aset(details, sym_samples, SIZET2NUM(frame_data->caller_samples));
-
-    if (frame_data->edges) {
-	edges = rb_hash_new();
-	rb_hash_aset(details, sym_edges, edges);
-	st_foreach(frame_data->edges, frame_edges_i, (st_data_t)edges);
-    }
-
-    if (frame_data->lines) {
-	lines = rb_hash_new();
-	rb_hash_aset(details, sym_lines, lines);
-	st_foreach(frame_data->lines, frame_lines_i, (st_data_t)lines);
-    }
-
-    return ST_CONTINUE;
-}
-
-static int
-insert_top_frame_to_ruby_hash(st_data_t frame, st_data_t value, void *data)
-{
-    VALUE top_frames_list = (VALUE)data;
-    VALUE top_frame = rb_hash_new();
-    VALUE frames = rb_hash_new();
-    allocation_data_t * allocation_data = (allocation_data_t *)value;
-
-    rb_ary_push(top_frames_list, top_frame);
-
-    rb_hash_aset(top_frame, sym_root, rb_obj_id(frame));
-
-    rb_hash_aset(top_frame, sym_frames, frames);
-
-    st_foreach(allocation_data->frames, frame_i, (st_data_t)frames);
-    return ST_CONTINUE;
-}
-
-static int
-insert_class_to_ruby_hash(st_data_t classname, st_data_t top_frame_table, void *data)
-{
-    VALUE rb_hash = (VALUE)data;
-    VALUE top_frames_list = rb_ary_new();
-    rb_hash_aset(rb_hash, (VALUE)classname, top_frames_list);
-    st_foreach((st_table *)top_frame_table, insert_top_frame_to_ruby_hash, top_frames_list);
-    return ST_CONTINUE;
-}
-
 static VALUE
 result(VALUE self)
 {
     trace_stats_t * stats;
+    sample_buffer_t * frames;
+    sample_buffer_t * lines;
+    size_t *record_offsets;
     VALUE result;
 
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
 
-    result = rb_hash_new();
+    frames = stats->stack_samples;
+    lines = stats->lines_samples;
 
-    st_foreach(stats->allocations, insert_class_to_ruby_hash, result);
+    if (frames && lines) {
+	printf("record count %d\n", frames->record_count);
+	size_t i = 0;
+	VALUE * frame = frames->samples;
 
+	size_t * head;
+	record_offsets = xcalloc(sizeof(size_t), frames->record_count);
+	head = record_offsets;
+
+	while(frame < frames->samples + frames->next_free) {
+	    *head = i;
+	    head++;
+	    i     += (*frame + 3); /* Increase the offset */
+	    frame += (*frame + 3); /* Move to the next frame */
+	}
+
+	qsort_r(record_offsets, frames->record_count, sizeof(size_t), frames, compare);
+
+	for(i = 0; i < frames->record_count; i++) {
+	    printf("afte offset %d\n", record_offsets[i]);
+	    VALUE * head = frames->samples + record_offsets[i];
+	    size_t stack_size = (size_t)*head;
+	    printf("stack size %d\n", stack_size);
+	    rb_p(*(head + stack_size + 2));
+	}
+
+	for(i = 0; i < frames->record_count; ) {
+	    printf("afte offset %d\n", record_offsets[i]);
+	    VALUE * head = frames->samples + record_offsets[i];
+	    size_t stack_size = (size_t)*head;
+	    printf("stack size %d\n", stack_size);
+	    rb_p(*(head + stack_size + 2));
+	}
+
+	xfree(record_offsets);
+
+	result = rb_hash_new();
+    } else {
+	result = Qnil;
+    }
     return result;
 }
 
