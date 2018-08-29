@@ -72,6 +72,36 @@ alloc_sample_buffer(size_t size)
 }
 
 static void
+dump_buffer(sample_buffer_t * buffer)
+{
+    VALUE * frame = buffer->samples;
+    int size = 0;
+
+    return dump_chunk(buffer->samples, buffer->next_free);
+    while(frame < buffer->samples + buffer->next_free) {
+	size_t stack_size;
+	VALUE * head;
+
+	stack_size = *frame;
+	printf("#########\n");
+	printf("Stack size: %d\n", stack_size);
+	frame++; /* First element is the stack size */
+	head = frame;
+
+	for(; frame < (head + stack_size); frame++) {
+	    printf("frame: %p\n", *frame);
+	}
+	frame++; /* Frame info */
+	printf("type: \n");
+	rb_p(*frame);
+	printf("#########\n");
+	frame++; /* Next Head */
+	size++;
+    }
+    printf("stacks: %d\n", size);
+}
+
+static void
 ensure_sample_buffer_capa(sample_buffer_t * buffer, size_t size)
 {
     /* If we can't fit all the samples in the buffer, double the buffer size. */
@@ -286,15 +316,81 @@ disable(VALUE self)
     return Qnil;
 }
 
+static int
+sort_frames(const void *left, const void *right)
+{
+    const VALUE *vleft = (const VALUE *)left;
+    const VALUE *vright = (const VALUE *)right;
+    /* Sort so that 0 is always at the right */
+    if (*vleft == *vright) {
+	return 0;
+    } else {
+	if (*vleft == 0) {
+	    return 1;
+	} else if (*vright == 0) {
+	    return -1;
+	}
+    }
+    return *vleft - *vright;
+}
+
 static VALUE
 frames(VALUE self)
 {
     trace_stats_t * stats;
+    sample_buffer_t * frame_buffer;
     VALUE frames;
+    VALUE * samples;
+    VALUE *head;
 
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
 
+    frame_buffer = stats->stack_samples;
+
+    samples = xcalloc(sizeof(VALUE), frame_buffer->capa);
+    memcpy(samples, frame_buffer->samples, frame_buffer->capa * sizeof(VALUE));
+
+    /* Clear anything that's not a frame */
+    for(head = samples; head < (samples + (frame_buffer->next_free - 1)); head++) {
+	size_t frame_count;
+	frame_count = *head;
+
+	*head = 0;
+	head++;              /* Skip the count */
+	head += frame_count; /* Skip the stack */
+	head++;              /* Skip the type */
+	*head = 0;
+    }
+
+    qsort(samples, frame_buffer->capa, sizeof(VALUE), sort_frames);
+
     frames = rb_hash_new();
+
+    for(head = samples; head < (samples + frame_buffer->capa); ) {
+	if (*head == 0)
+	    break;
+
+	VALUE file;
+
+	file = rb_profile_frame_absolute_path(*head);
+	if (NIL_P(file))
+	    file = rb_profile_frame_path(*head);
+
+	rb_hash_aset(frames, rb_obj_id(*head),
+		rb_ary_new3(2, rb_profile_frame_full_label(*head),
+		               file));
+
+	/* Skip duplicates */
+	VALUE *cmp;
+	for (cmp = head + 1; cmp < (samples + frame_buffer->capa); cmp++) {
+	    if (*cmp != *head) {
+		break;
+	    }
+	}
+	head = cmp;
+    }
+
+    xfree(samples);
 
     return frames;
 }
