@@ -72,36 +72,6 @@ alloc_sample_buffer(size_t size)
 }
 
 static void
-dump_buffer(sample_buffer_t * buffer)
-{
-    VALUE * frame = buffer->samples;
-    int size = 0;
-
-    return dump_chunk(buffer->samples, buffer->next_free);
-    while(frame < buffer->samples + buffer->next_free) {
-	size_t stack_size;
-	VALUE * head;
-
-	stack_size = *frame;
-	printf("#########\n");
-	printf("Stack size: %d\n", stack_size);
-	frame++; /* First element is the stack size */
-	head = frame;
-
-	for(; frame < (head + stack_size); frame++) {
-	    printf("frame: %p\n", *frame);
-	}
-	frame++; /* Frame info */
-	printf("type: \n");
-	rb_p(*frame);
-	printf("#########\n");
-	frame++; /* Next Head */
-	size++;
-    }
-    printf("stacks: %d\n", size);
-}
-
-static void
 ensure_sample_buffer_capa(sample_buffer_t * buffer, size_t size)
 {
     /* If we can't fit all the samples in the buffer, double the buffer size. */
