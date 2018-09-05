@@ -6,15 +6,67 @@ module ObjectSpace
     VERSION = '1.0.0'
 
     class Result
-      def initialize samples, frames
-        @samples = samples
-        @frames = frames
-        samples.each do |type, count, stack|
-          p type => count
-          stack.each do |frame_id, line|
-            p frames[frame_id] => line
-          end
+      class Frame
+        attr_reader :id, :name, :count, :callers
+
+        def initialize id, name, path, line, count, callers
+          @id = id
+          @name   = name
+          @path     = path
+          @line     = line
+          @count    = count
+          @callers = callers
         end
+
+        def total_samples
+          0
+        end
+      end
+
+      def initialize samples, frames
+        @samples = samples.sort_by! { |s| s[1] }.reverse!
+        @frames = frames
+      end
+
+      def allocations_by_type
+        @samples.each_with_object(Hash.new(0)) do |(type, count, _), h|
+          h[type] += count
+        end
+      end
+
+      def allocations_with_top_frame
+        @samples.each_with_object({}) do |(type, count, stack), h|
+          top_frame_id, line = stack.first
+          _, path = @frames[top_frame_id]
+          ((h[type] ||= {})[path] ||= {})[line] = count
+        end
+      end
+
+      def allocations_with_call_tree
+        types_with_stacks = @samples.group_by(&:first)
+        types_with_stacks.map do |type, stacks|
+          seed = build_initial_tree(*stacks.shift)
+          #_tree = stacks.inject(seed) do |tree, (_, count, stack)|
+          #end
+          [type, seed]
+        end
+      end
+
+      private
+
+      def build_initial_tree type, count, stack
+        bottom_up = stack.reverse
+        _frame_id, _line = bottom_up.shift
+        initial = build_frame _frame_id, _line, count, nil
+
+        bottom_up.inject(initial) do |node, (frame_id, line)|
+          build_frame frame_id, line, count, [node]
+        end
+      end
+
+      def build_frame frame_id, line, count, child
+        method, path = @frames[frame_id]
+        Frame.new frame_id, method, path, line, count, child
       end
     end
 
@@ -32,8 +84,8 @@ module ObjectSpace
         end
 
         def show frames
-          max_width = max_width(frames.root, frames.incoming_edges, 0, {})
-          display(frames.root, frames.incoming_edges, 0, frames.root[:samples], [], {}, max_width)
+          max_width = max_width(frames, 0, {})
+          display(frames, 0, frames.count, [], {}, max_width)
         end
 
         private
@@ -42,31 +94,39 @@ module ObjectSpace
           max_depth != 0 && depth > max_depth - 1
         end
 
-        def max_width frame, incoming_edges, depth, seen
-          return 0 if too_deep? depth
-          return 0 if seen.key? frame[:id]
-          seen[frame[:id]] = true
+        def max_width frame, depth, seen
+          if too_deep? depth
+            return 0
+          end
 
-          my_length = (depth * 4) + frame[:name].length
+          if seen.key? frame
+            return 0
+          end
 
-          callers = (incoming_edges[frame[:id]] || [])
+          seen[frame] = true
 
-          callers.each do |caller|
-            child_len = max_width caller, incoming_edges, depth + 1, seen
+          my_length = (depth * 4) + frame.name.length
+
+          frame.callers.each do |caller|
+            child_len = max_width caller, depth + 1, seen
             my_length = child_len if my_length < child_len
           end
 
           my_length
         end
 
-        def display frame, incoming_edges, depth, total_samples, last_stack, seen, max_width
+        def display frame, depth, total_samples, last_stack, seen, max_width
           return if too_deep? depth
-          return if seen.key? frame[:id]
-          seen[frame[:id]] = true
+          if seen.key? frame
+            return
+          else
+            seen[frame] = true
+          end
 
-          buffer = max_width - ((depth * 4) + frame[:name].length)
 
-          call, total = frame.values_at(:samples, :total_samples)
+          buffer = max_width - ((depth * 4) + frame.name.length)
+
+          call = frame.count
           last_stack.each_with_index do |last, i|
             if i == last_stack.length - 1
               if last
@@ -84,17 +144,17 @@ module ObjectSpace
           end
 
 
-          printf frame[:name]
+          printf frame.name
           printf " " * buffer
-          printf "% d % 8s  % 10d % 8s", total, "(%2.1f%%)" % (total*100.0/total_samples), call, "(%2.1f%%)" % (call*100.0/total_samples)
+          printf "% d % 8s", call, "(%2.1f%%)" % (call*100.0/total_samples)
           puts
-          callers = (incoming_edges[frame[:id]] || []).sort_by { |ie|
-            -ie[:total_samples]
-          }.reject { |caller| seen[caller[:id]] }
+          callers = (frame.callers || []).sort_by { |ie|
+            -ie.total_samples
+          }.reject { |caller| seen[caller.id] }
 
           callers.each_with_index do |caller, i|
             s = last_stack + [i == callers.length - 1]
-            display caller, incoming_edges, depth + 1, total_samples, s, seen, max_width
+            display caller, depth + 1, total_samples, s, seen, max_width
           end
         end
       end
@@ -120,18 +180,7 @@ module ObjectSpace
 
     def heaviest_types_by_file_and_line
       result = self.result
-      thing = result.flat_map do |class_name, top_frames|
-        top_frames.flat_map do |info|
-          frames = info[:frames]
-          frame_id = info[:root]
-          root = frames[frame_id]
-          collection = FramesCollection.new root, frames.values
-          root[:lines].map do |line, (_, count)|
-            [count, class_name, root[:file], line, collection]
-          end
-        end
-      end
-      thing.sort_by!(&:first).reverse!
+      result.allocations_with_call_tree
     end
   end
 end

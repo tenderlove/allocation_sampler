@@ -101,7 +101,7 @@ class TestAllocationSampler < Minitest::Test
     Object.new; Object.new
     as.disable
 
-    assert_equal(4, filter(as.result)[Object.name].values.flat_map(&:values).inject(:+))
+    assert_equal 4, as.result.allocations_by_type[Object.name]
   end
 
   class X
@@ -117,8 +117,9 @@ class TestAllocationSampler < Minitest::Test
     Object.new
     as.disable
 
-    assert_equal(501, filter(as.result)[Object.name].values.flat_map(&:values).inject(:+))
-    assert_equal(500, filter(as.result)[TestAllocationSampler::X.name].values.flat_map(&:values).inject(:+))
+    result = as.result
+    assert_equal 501, result.allocations_by_type[Object.name]
+    assert_equal 500, result.allocations_by_type[TestAllocationSampler::X.name]
   end
 
   def d
@@ -133,35 +134,28 @@ class TestAllocationSampler < Minitest::Test
     buffer = StringIO.new
     stack_printer = ObjectSpace::AllocationSampler::Display::Stack.new(
       output: buffer,
-      max_depth: 4
+      max_depth: 7
     )
     as.enable
     a
     as.disable
-    as.heaviest_types_by_file_and_line.each do |count, class_name, file, line, frames|
-      stack_printer.show frames
+    as.heaviest_types_by_file_and_line.each do |class_name, tree|
+      stack_printer.show tree
     end
     assert_equal <<-eoout, buffer.string
-TestAllocationSampler#d             125 (100.0%)         125 (100.0%)
-`-- TestAllocationSampler#c         125 (100.0%)           0   (0.0%)
-    `-- TestAllocationSampler#b     125 (100.0%)           0   (0.0%)
-        `-- TestAllocationSampler#a 125 (100.0%)           0   (0.0%)
+TestAllocationSampler#d                         125 (100.0%)
+`-- TestAllocationSampler#c                     125 (100.0%)
+    `-- TestAllocationSampler#c                 125 (100.0%)
+        `-- TestAllocationSampler#b             125 (100.0%)
+            `-- TestAllocationSampler#b         125 (100.0%)
+                `-- TestAllocationSampler#a     125 (100.0%)
+                    `-- TestAllocationSampler#a 125 (100.0%)
     eoout
   end
 
   private
 
   def filter result
-    result.each_with_object({}) do |(k, top_frames), a|
-      file_table = a[k] ||= {}
-
-      top_frames.each do |top_frame_info|
-        top_frame = top_frame_info[:frames][top_frame_info[:root]]
-        line_table = file_table[top_frame[:file]] ||= {}
-        top_frame[:lines].each do |line, (_, count)|
-          line_table[line] = count
-        end
-      end
-    end
+    result.allocations_with_top_frame
   end
 end
