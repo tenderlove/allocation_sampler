@@ -132,9 +132,17 @@ compare(void *ctx, size_t * l, size_t * r)
 
     if (lstack == rstack) {
 	/* Compare the stack plus type info */
-	int stack_cmp = memcmp(stacks->samples + left_offset, stacks->samples + right_offset, (lstack + 3) * sizeof(VALUE *));
+	int stack_cmp = memcmp(stacks->samples + left_offset,
+		               stacks->samples + right_offset,
+			       (lstack + 3) * sizeof(VALUE *));
+
 	if (stack_cmp == 0) {
-	    return memcmp(lines->samples + left_offset, lines->samples + right_offset, (lstack + 3) * sizeof(VALUE *));
+	    /* If the stacks are the same, check the line numbers */
+	    int line_cmp = memcmp(lines->samples + left_offset + 1,
+		                  lines->samples + right_offset + 1,
+				  lstack * sizeof(int));
+
+	    return line_cmp;
 	} else {
 	    return stack_cmp;
 	}
@@ -240,7 +248,13 @@ newobj(VALUE tpval, void *ptr)
 		memcpy(stack_samples->samples + stack_samples->next_free + 1, frames_buffer, num * sizeof(VALUE *));
 		memcpy(lines_samples->samples + lines_samples->next_free + 1, lines_buffer, num * sizeof(int));
 
+		/* We're not doing de-duping right now, so just set the stack count to 0xdeadbeef */
+		stack_samples->samples[stack_samples->next_free + num + 1] = 0xdeadbeef;
 		stack_samples->samples[stack_samples->next_free + num + 2] = uc;
+
+		lines_samples->samples[stack_samples->next_free + num + 1] = 0xdeadbeef;
+		lines_samples->samples[stack_samples->next_free + num + 2] = uc;
+
 		stack_samples->next_free += (num + 3);
 		lines_samples->next_free += (num + 3);
 
@@ -310,39 +324,42 @@ frames(VALUE self)
     trace_stats_t * stats;
     sample_buffer_t * frame_buffer;
     VALUE frames;
-    VALUE * samples;
+    VALUE *samples;
     VALUE *head;
+    size_t buffer_size;
 
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
 
     frame_buffer = stats->stack_samples;
+    buffer_size = frame_buffer->next_free - 1;
 
-    samples = xcalloc(sizeof(VALUE), frame_buffer->capa);
-    memcpy(samples, frame_buffer->samples, frame_buffer->capa * sizeof(VALUE));
+    samples = xcalloc(sizeof(VALUE), buffer_size);
+    memcpy(samples, frame_buffer->samples, buffer_size * sizeof(VALUE));
 
     /* Clear anything that's not a frame */
-    for(head = samples; head < (samples + (frame_buffer->next_free - 1)); head++) {
+    for(head = samples; head < (samples + buffer_size); head++) {
 	size_t frame_count;
 	frame_count = *head;
 
 	*head = 0;
 	head++;              /* Skip the count */
 	head += frame_count; /* Skip the stack */
-	head++;              /* Skip the type */
-	*head = 0;
+	*head = 0;           /* Set the de-dup count to 0 */
+	head++;
+	*head = 0;           /* Set the type to 0 */
     }
 
-    qsort(samples, frame_buffer->capa, sizeof(VALUE), sort_frames);
+    qsort(samples, buffer_size, sizeof(VALUE *), sort_frames);
 
     frames = rb_hash_new();
 
-    for(head = samples; head < (samples + frame_buffer->capa); ) {
+    for(head = samples; head < (samples + buffer_size); ) {
 	if (*head == 0)
 	    break;
 
 	VALUE file;
 
-	file = rb_profile_frame_absolute_path(*head);
+	file = rb_profile_frame_absolute_path(*(VALUE *)head);
 	if (NIL_P(file))
 	    file = rb_profile_frame_path(*head);
 
@@ -352,7 +369,7 @@ frames(VALUE self)
 
 	/* Skip duplicates */
 	VALUE *cmp;
-	for (cmp = head + 1; cmp < (samples + frame_buffer->capa); cmp++) {
+	for (cmp = head + 1; cmp < (samples + buffer_size); cmp++) {
 	    if (*cmp != *head) {
 		break;
 	    }
