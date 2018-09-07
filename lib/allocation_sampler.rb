@@ -1,25 +1,64 @@
 require 'allocation_sampler.so'
 require 'delegate'
+require 'set'
+require 'cgi/escape'
 
 module ObjectSpace
   class AllocationSampler
     VERSION = '1.0.0'
 
-    class Result
-      class Frame
-        attr_reader :id, :name, :count, :callers
+    class Frame
+      attr_reader :id, :name, :path, :children
 
-        def initialize id, name, path, line, count, callers
-          @id = id
-          @name   = name
-          @path     = path
-          @line     = line
-          @count    = count
-          @callers = callers
+      def initialize id, name, path
+        @id       = id
+        @name     = name
+        @path     = path
+      end
+    end
+
+    class Result
+      class Frame < DelegateClass(AllocationSampler::Frame)
+        attr_reader :line, :children
+        attr_accessor :samples, :total_samples
+
+        include Enumerable
+
+        def initialize frame, line, samples
+          super(frame)
+          @line = line
+          @samples = samples
+          @total_samples = 0
+          @children = []
         end
 
-        def total_samples
-          0
+        def each
+          seen = {}
+          stack = [self]
+
+          while node = stack.pop
+            next if seen[node]
+            seen[node] = true
+            yield node
+            stack.concat node.children
+          end
+        end
+
+        def to_dot
+          seen = {}
+          "digraph allocations {\n" +
+            "  node[shape=record];\n" + print_edges(self, seen) + "}\n"
+        end
+
+        def print_edges node, seen
+          return '' if seen[node.id]
+          seen[node.id] = node
+          "  #{node.id} [label=\"#{CGI.escapeHTML node.name}\"];\n" +
+            node.children.map { |child|
+            ratio = child.samples / samples.to_f
+            width = 3 * ratio
+            "  #{node.id} -> #{child.id} [penwidth=#{width}];\n" + print_edges(child, seen)
+          }.join
         end
       end
 
@@ -42,19 +81,47 @@ module ObjectSpace
         end
       end
 
-      def allocations_with_call_tree
-        p @samples
-        @samples.each do |type, line, stack|
-          stack.each do |frame_id, line|
-            p @frames[frame_id] => line
-          end
+      def calltree
+        root  = Set.new
+
+        frame_delegates = {}
+        @samples.each do |type, count, stack|
+          root << build_tree(stack, count, frame_delegates)
         end
+        # We should only ever have one root
+        root.first
+      end
+
+      def build_tree stack, count, frame_delegates
+        top_down = stack.reverse
+        last_caller = nil
+        seen = Set.new
+        root = nil
+        top_frame_id, top_line = stack.first
+        top = frame_delegates[top_frame_id] ||= Frame.new(@frames[top_frame_id], top_line, 0)
+        top.samples += count
+        top_down.each do |frame_id, line|
+          frame = frame_delegates[frame_id] ||= Frame.new(@frames[frame_id], line, 0)
+          root ||= frame
+          if last_caller
+            last_caller.children << frame
+          end
+          last_caller = frame
+          last_caller.total_samples += count unless seen.include?(frame_id)
+          seen << frame_id
+        end
+        root
+      end
+
+      def allocations_with_call_tree
         types_with_stacks = @samples.group_by(&:first)
         types_with_stacks.map do |type, stacks|
-          seed = build_initial_tree(*stacks.shift)
-          #_tree = stacks.inject(seed) do |tree, (_, count, stack)|
-          #end
-          [type, seed]
+          frame_delegates = {}
+          root = Set.new
+          stacks.each do |_, count, stack|
+            root << build_tree(stack, count, frame_delegates)
+          end
+          [type, root.first]
         end
       end
 
@@ -71,8 +138,7 @@ module ObjectSpace
       end
 
       def build_frame frame_id, line, count, child
-        method, path = @frames[frame_id]
-        Frame.new frame_id, method, path, line, count, child
+        Frame.new @frames[frame_id], line, count
       end
     end
 
@@ -91,7 +157,7 @@ module ObjectSpace
 
         def show frames
           max_width = max_width(frames, 0, {})
-          display(frames, 0, frames.count, [], {}, max_width)
+          display(frames, 0, frames.total_samples, [], {}, max_width)
         end
 
         private
@@ -113,7 +179,7 @@ module ObjectSpace
 
           my_length = (depth * 4) + frame.name.length
 
-          frame.callers.each do |caller|
+          frame.children.each do |caller|
             child_len = max_width caller, depth + 1, seen
             my_length = child_len if my_length < child_len
           end
@@ -123,6 +189,7 @@ module ObjectSpace
 
         def display frame, depth, total_samples, last_stack, seen, max_width
           return if too_deep? depth
+
           if seen.key? frame
             return
           else
@@ -132,7 +199,7 @@ module ObjectSpace
 
           buffer = max_width - ((depth * 4) + frame.name.length)
 
-          call = frame.count
+          self_samples = frame.samples
           last_stack.each_with_index do |last, i|
             if i == last_stack.length - 1
               if last
@@ -152,9 +219,9 @@ module ObjectSpace
 
           printf frame.name
           printf " " * buffer
-          printf "% d % 8s", call, "(%2.1f%%)" % (call*100.0/total_samples)
+          printf "% d % 8s", self_samples, "(%2.1f%%)" % (self_samples*100.0/total_samples)
           puts
-          callers = (frame.callers || []).sort_by { |ie|
+          callers = (frame.children || []).sort_by { |ie|
             -ie.total_samples
           }.reject { |caller| seen[caller.id] }
 

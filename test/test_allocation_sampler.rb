@@ -133,23 +133,23 @@ class TestAllocationSampler < Minitest::Test
     as = ObjectSpace::AllocationSampler.new
     buffer = StringIO.new
     stack_printer = ObjectSpace::AllocationSampler::Display::Stack.new(
-      output: buffer,
-      max_depth: 7
+      output: buffer
     )
     as.enable
     a
     as.disable
+
+    #File.write 'out.dot', as.result.calltree.to_dot
     as.heaviest_types_by_file_and_line.each do |class_name, tree|
-      stack_printer.show tree
+      root = tree.find { |node| node.name.include? __method__.to_s }
+      stack_printer.show root
     end
     assert_equal <<-eoout, buffer.string
-TestAllocationSampler#d                         125 (100.0%)
-`-- TestAllocationSampler#c                     125 (100.0%)
-    `-- TestAllocationSampler#c                 125 (100.0%)
-        `-- TestAllocationSampler#b             125 (100.0%)
-            `-- TestAllocationSampler#b         125 (100.0%)
-                `-- TestAllocationSampler#a     125 (100.0%)
-                    `-- TestAllocationSampler#a 125 (100.0%)
+TestAllocationSampler#test_stack_trace  0   (0.0%)
+`-- TestAllocationSampler#a             0   (0.0%)
+    `-- TestAllocationSampler#b         0   (0.0%)
+        `-- TestAllocationSampler#c     0   (0.0%)
+            `-- TestAllocationSampler#d 125 (100.0%)
     eoout
   end
 

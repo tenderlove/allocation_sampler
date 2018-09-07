@@ -356,6 +356,8 @@ frames(VALUE self)
     VALUE frames;
     VALUE *samples;
     VALUE *head;
+    VALUE rb_cFrame;
+
     size_t buffer_size;
 
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
@@ -383,19 +385,28 @@ frames(VALUE self)
 
     frames = rb_hash_new();
 
+    rb_cFrame = rb_const_get(rb_cAllocationSampler, rb_intern("Frame"));
+
     for(head = samples; head < (samples + buffer_size); ) {
 	if (*head == 0)
 	    break;
 
 	VALUE file;
+	VALUE frame;
 
 	file = rb_profile_frame_absolute_path(*(VALUE *)head);
 	if (NIL_P(file))
 	    file = rb_profile_frame_path(*head);
 
-	rb_hash_aset(frames, rb_obj_id(*head),
-		rb_ary_new3(2, rb_profile_frame_full_label(*head),
-		               file));
+	VALUE args[3];
+
+	args[0] = rb_obj_id(*head);
+	args[1] = rb_profile_frame_full_label(*head);
+	args[2] = file;
+
+	frame = rb_class_new_instance(3, args, rb_cFrame);
+
+	rb_hash_aset(frames, rb_obj_id(*head), frame);
 
 	/* Skip duplicates */
 	VALUE *cmp;
@@ -537,6 +548,7 @@ void
 Init_allocation_sampler(void)
 {
     VALUE rb_mObjSpace = rb_const_get(rb_cObject, rb_intern("ObjectSpace"));
+
     rb_cAllocationSampler = rb_define_class_under(rb_mObjSpace, "AllocationSampler", rb_cObject);
     rb_define_alloc_func(rb_cAllocationSampler, allocate);
     rb_define_method(rb_cAllocationSampler, "initialize", initialize, -1);
