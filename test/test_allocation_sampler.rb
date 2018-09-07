@@ -139,7 +139,6 @@ class TestAllocationSampler < Minitest::Test
     a
     as.disable
 
-    #File.write 'out.dot', as.result.calltree.to_dot
     as.heaviest_types_by_file_and_line.each do |class_name, tree|
       root = tree.find { |node| node.name.include? __method__.to_s }
       stack_printer.show root
@@ -151,6 +150,15 @@ TestAllocationSampler#test_stack_trace  0   (0.0%)
         `-- TestAllocationSampler#c     0   (0.0%)
             `-- TestAllocationSampler#d 125 (100.0%)
     eoout
+  end
+
+  def test_dot
+    as = ObjectSpace::AllocationSampler.new
+    as.enable
+    a
+    as.disable
+
+    File.write 'out.dot', as.result.calltree.to_dot
   end
 
   private

@@ -47,17 +47,17 @@ module ObjectSpace
         def to_dot
           seen = {}
           "digraph allocations {\n" +
-            "  node[shape=record];\n" + print_edges(self, seen) + "}\n"
+            "  node[shape=record];\n" + print_edges(self, seen, total_samples) + "}\n"
         end
 
-        def print_edges node, seen
+        def print_edges node, seen, total_samples
           return '' if seen[node.id]
           seen[node.id] = node
           "  #{node.id} [label=\"#{CGI.escapeHTML node.name}\"];\n" +
             node.children.map { |child|
-            ratio = child.samples / samples.to_f
-            width = 3 * ratio
-            "  #{node.id} -> #{child.id} [penwidth=#{width}];\n" + print_edges(child, seen)
+            ratio = child.total_samples / total_samples.to_f
+            width = (1 * ratio) + 1
+            "  #{node.id} -> #{child.id} [penwidth=#{width}];\n" + print_edges(child, seen, total_samples)
           }.join
         end
       end
@@ -76,8 +76,8 @@ module ObjectSpace
       def allocations_with_top_frame
         @samples.each_with_object({}) do |(type, count, stack), h|
           top_frame_id, line = stack.first
-          _, path = @frames[top_frame_id]
-          ((h[type] ||= {})[path] ||= {})[line] = count
+          frame = @frames[top_frame_id]
+          ((h[type] ||= {})[frame.path] ||= {})[line] = count
         end
       end
 
@@ -90,27 +90,6 @@ module ObjectSpace
         end
         # We should only ever have one root
         root.first
-      end
-
-      def build_tree stack, count, frame_delegates
-        top_down = stack.reverse
-        last_caller = nil
-        seen = Set.new
-        root = nil
-        top_frame_id, top_line = stack.first
-        top = frame_delegates[top_frame_id] ||= Frame.new(@frames[top_frame_id], top_line, 0)
-        top.samples += count
-        top_down.each do |frame_id, line|
-          frame = frame_delegates[frame_id] ||= Frame.new(@frames[frame_id], line, 0)
-          root ||= frame
-          if last_caller
-            last_caller.children << frame
-          end
-          last_caller = frame
-          last_caller.total_samples += count unless seen.include?(frame_id)
-          seen << frame_id
-        end
-        root
       end
 
       def allocations_with_call_tree
@@ -127,18 +106,29 @@ module ObjectSpace
 
       private
 
-      def build_initial_tree type, count, stack
-        bottom_up = stack.reverse
-        _frame_id, _line = bottom_up.shift
-        initial = build_frame _frame_id, _line, count, nil
-
-        bottom_up.inject(initial) do |node, (frame_id, line)|
-          build_frame frame_id, line, count, [node]
+      def build_tree stack, count, frame_delegates
+        top_down = stack.reverse
+        last_caller = nil
+        seen = Set.new
+        root = nil
+        top_frame_id, top_line = stack.first
+        top = frame_delegates[top_frame_id] ||= build_frame(top_frame_id, top_line, 0)
+        top.samples += count
+        top_down.each do |frame_id, line|
+          frame = frame_delegates[frame_id] ||= build_frame(frame_id, line, 0)
+          root ||= frame
+          if last_caller
+            last_caller.children << frame
+          end
+          last_caller = frame
+          last_caller.total_samples += count unless seen.include?(frame_id)
+          seen << frame_id
         end
+        root
       end
 
-      def build_frame frame_id, line, count, child
-        Frame.new @frames[frame_id], line, count
+      def build_frame id, line, samples
+        Frame.new @frames[id], line, samples
       end
     end
 
