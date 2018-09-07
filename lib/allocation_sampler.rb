@@ -43,6 +43,12 @@ module ObjectSpace
       end
 
       def allocations_with_call_tree
+        p @samples
+        @samples.each do |type, line, stack|
+          stack.each do |frame_id, line|
+            p @frames[frame_id] => line
+          end
+        end
         types_with_stacks = @samples.group_by(&:first)
         types_with_stacks.map do |type, stacks|
           seed = build_initial_tree(*stacks.shift)

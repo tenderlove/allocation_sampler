@@ -33,11 +33,15 @@ digraph objects {
 */
 
 typedef struct {
-    VALUE *samples;
+    char   frames;
     size_t capa;
     size_t next_free;
     size_t prev_free;
     size_t record_count;
+    union {
+	VALUE *frames;
+	int *lines;
+    } as;
 } sample_buffer_t;
 
 typedef struct {
@@ -58,16 +62,31 @@ typedef struct {
 static void
 free_sample_buffer(sample_buffer_t *buffer)
 {
-    xfree(buffer->samples);
+    if (buffer->frames) {
+	xfree(buffer->as.lines);
+    } else {
+	xfree(buffer->as.frames);
+    }
     xfree(buffer);
 }
 
 static sample_buffer_t *
-alloc_sample_buffer(size_t size)
+alloc_lines_buffer(size_t size)
 {
     sample_buffer_t * samples = xcalloc(sizeof(sample_buffer_t), 1);
-    samples->samples = xcalloc(sizeof(VALUE), size);
+    samples->as.lines = xcalloc(sizeof(int), size);
     samples->capa = size;
+    samples->frames = 0;
+    return samples;
+}
+
+static sample_buffer_t *
+alloc_frames_buffer(size_t size)
+{
+    sample_buffer_t * samples = xcalloc(sizeof(sample_buffer_t), 1);
+    samples->as.frames = xcalloc(sizeof(VALUE), size);
+    samples->capa = size;
+    samples->frames = 1;
     return samples;
 }
 
@@ -77,7 +96,11 @@ ensure_sample_buffer_capa(sample_buffer_t * buffer, size_t size)
     /* If we can't fit all the samples in the buffer, double the buffer size. */
     while (buffer->capa <= (buffer->next_free - 1) + (size + 2)) {
 	buffer->capa *= 2;
-	buffer->samples = xrealloc(buffer->samples, sizeof(VALUE) * buffer->capa);
+	if (buffer->frames) {
+	    buffer->as.frames = xrealloc(buffer->as.frames, sizeof(VALUE) * buffer->capa);
+	} else {
+	    buffer->as.lines = xrealloc(buffer->as.lines, sizeof(int) * buffer->capa);
+	}
     }
 }
 
@@ -99,7 +122,7 @@ dealloc(void *ptr)
 }
 
 static VALUE
-make_frame_info(VALUE *frames, VALUE *lines)
+make_frame_info(VALUE *frames, int *lines)
 {
     size_t count, i;
     VALUE rb_frames;
@@ -111,7 +134,14 @@ make_frame_info(VALUE *frames, VALUE *lines)
     rb_frames = rb_ary_new_capa(count);
 
     for(i = 0; i < count; i++, frames++, lines++) {
-	rb_ary_push(rb_frames, rb_ary_new3(2, rb_obj_id(*frames), INT2NUM(*lines)));
+	VALUE line = rb_profile_frame_first_lineno(*frames);
+	if (line != INT2NUM(0)) {
+	    line = INT2NUM(*lines);
+	}
+	if (NUM2INT(line) > 10000) {
+	    printf("wtf\n");
+	}
+	rb_ary_push(rb_frames, rb_ary_new3(2, rb_obj_id(*frames), line));
     }
 
     return rb_frames;
@@ -127,19 +157,19 @@ compare(void *ctx, size_t * l, size_t * r)
     size_t left_offset = *l;
     size_t right_offset = *r;
 
-    size_t lstack = *(stacks->samples + left_offset);
-    size_t rstack = *(stacks->samples + right_offset);
+    size_t lstack = *(stacks->as.frames + left_offset);
+    size_t rstack = *(stacks->as.frames + right_offset);
 
     if (lstack == rstack) {
 	/* Compare the stack plus type info */
-	int stack_cmp = memcmp(stacks->samples + left_offset,
-		               stacks->samples + right_offset,
+	int stack_cmp = memcmp(stacks->as.frames + left_offset,
+		               stacks->as.frames + right_offset,
 			       (lstack + 3) * sizeof(VALUE *));
 
 	if (stack_cmp == 0) {
 	    /* If the stacks are the same, check the line numbers */
-	    int line_cmp = memcmp(lines->samples + left_offset + 1,
-		                  lines->samples + right_offset + 1,
+	    int line_cmp = memcmp(lines->as.lines + left_offset + 1,
+		                  lines->as.lines + right_offset + 1,
 				  lstack * sizeof(int));
 
 	    return line_cmp;
@@ -163,9 +193,9 @@ mark(void * ptr)
 
     stacks = stats->stack_samples;
 
-    VALUE * frame = stacks->samples;
+    VALUE * frame = stacks->as.frames;
 
-    while(frame < stacks->samples + stacks->next_free) {
+    while(frame < stacks->as.frames + stacks->next_free) {
 	size_t stack_size;
 	VALUE * head;
 
@@ -230,8 +260,8 @@ newobj(VALUE tpval, void *ptr)
 
 		int num = rb_profile_frames(0, sizeof(frames_buffer) / sizeof(VALUE), frames_buffer, lines_buffer);
 		if (!stats->stack_samples) {
-		    stats->stack_samples = alloc_sample_buffer(num * 100);
-		    stats->lines_samples = alloc_sample_buffer(num * 100);
+		    stats->stack_samples = alloc_frames_buffer(num * 100);
+		    stats->lines_samples = alloc_lines_buffer(num * 100);
 		}
 		stack_samples = stats->stack_samples;
 		lines_samples = stats->lines_samples;
@@ -242,18 +272,18 @@ newobj(VALUE tpval, void *ptr)
 		stack_samples->prev_free = stack_samples->next_free;
 		lines_samples->prev_free = lines_samples->next_free;
 
-		stack_samples->samples[stack_samples->next_free] = (VALUE)num;
-		lines_samples->samples[lines_samples->next_free] = (VALUE)num;
+		stack_samples->as.frames[stack_samples->next_free] = (VALUE)num;
+		lines_samples->as.lines[lines_samples->next_free] = (VALUE)num;
 
-		memcpy(stack_samples->samples + stack_samples->next_free + 1, frames_buffer, num * sizeof(VALUE *));
-		memcpy(lines_samples->samples + lines_samples->next_free + 1, lines_buffer, num * sizeof(int));
+		memcpy(stack_samples->as.frames + stack_samples->next_free + 1, frames_buffer, num * sizeof(VALUE *));
+		memcpy(lines_samples->as.lines + lines_samples->next_free + 1, lines_buffer, num * sizeof(int));
 
 		/* We're not doing de-duping right now, so just set the stack count to 0xdeadbeef */
-		stack_samples->samples[stack_samples->next_free + num + 1] = 0xdeadbeef;
-		stack_samples->samples[stack_samples->next_free + num + 2] = uc;
+		stack_samples->as.frames[stack_samples->next_free + num + 1] = 0xdeadbeef;
+		stack_samples->as.frames[stack_samples->next_free + num + 2] = uc;
 
-		lines_samples->samples[stack_samples->next_free + num + 1] = 0xdeadbeef;
-		lines_samples->samples[stack_samples->next_free + num + 2] = uc;
+		lines_samples->as.lines[stack_samples->next_free + num + 1] = 0xdeadbeef;
+		lines_samples->as.lines[stack_samples->next_free + num + 2] = uc;
 
 		stack_samples->next_free += (num + 3);
 		lines_samples->next_free += (num + 3);
@@ -334,7 +364,7 @@ frames(VALUE self)
     buffer_size = frame_buffer->next_free - 1;
 
     samples = xcalloc(sizeof(VALUE), buffer_size);
-    memcpy(samples, frame_buffer->samples, buffer_size * sizeof(VALUE));
+    memcpy(samples, frame_buffer->as.frames, buffer_size * sizeof(VALUE));
 
     /* Clear anything that's not a frame */
     for(head = samples; head < (samples + buffer_size); head++) {
@@ -399,7 +429,7 @@ samples(VALUE self)
     if (frames && lines) {
 	size_t i, j;
 	size_t * head;
-	VALUE * frame = frames->samples;
+	VALUE * frame = frames->as.frames;
 	compare_data_t compare_ctx;
 	compare_ctx.frames = frames;
 	compare_ctx.lines = lines;
@@ -408,7 +438,7 @@ samples(VALUE self)
 	head = record_offsets;
 
 	i = 0;
-	while(frame < frames->samples + frames->next_free) {
+	while(frame < frames->as.frames + frames->next_free) {
 	    *head = i;             /* Store the frame start offset */
 	    head++;                /* Move to the next entry in record_offsets */
 	    i     += (*frame + 3); /* Increase the offset */
@@ -437,15 +467,15 @@ samples(VALUE self)
 
 	    i = j;
 
-	    size_t stack_size = *(frames->samples + current);
+	    size_t stack_size = *(frames->as.frames + current);
 
-	    VALUE type = *(frames->samples + current + stack_size + 2);
+	    VALUE type = *(frames->as.frames + current + stack_size + 2);
 
 	    rb_ary_push(unique_frames,
 		    rb_ary_new3(3,
 			type,
 			INT2NUM(count + 1),
-			make_frame_info(frames->samples + current, lines->samples + current)));
+			make_frame_info(frames->as.frames + current, lines->as.lines + current)));
 
 	}
 
