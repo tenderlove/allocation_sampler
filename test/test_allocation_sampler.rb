@@ -139,7 +139,8 @@ class TestAllocationSampler < Minitest::Test
     a
     as.disable
 
-    as.heaviest_types_by_file_and_line.each do |class_name, tree|
+    as.result.by_type_with_call_tree.each do |class_name, tree|
+      assert_equal Object.name, class_name
       root = tree.find { |node| node.name.include? __method__.to_s }
       stack_printer.show root
     end

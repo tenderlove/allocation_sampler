@@ -50,6 +50,8 @@ module ObjectSpace
             "  node[shape=record];\n" + print_edges(self, seen, total_samples) + "}\n"
         end
 
+        private
+
         def print_edges node, seen, total_samples
           return '' if seen[node.id]
           seen[node.id] = node
@@ -82,25 +84,19 @@ module ObjectSpace
       end
 
       def calltree
-        root  = Set.new
-
         frame_delegates = {}
-        @samples.each do |type, count, stack|
-          root << build_tree(stack, count, frame_delegates)
-        end
-        # We should only ever have one root
-        root.first
+        @samples.map { |type, count, stack|
+          build_tree(stack, count, frame_delegates)
+        }.uniq.first
       end
 
-      def allocations_with_call_tree
+      def by_type_with_call_tree
         types_with_stacks = @samples.group_by(&:first)
-        types_with_stacks.map do |type, stacks|
+        types_with_stacks.transform_values do |stacks|
           frame_delegates = {}
-          root = Set.new
-          stacks.each do |_, count, stack|
-            root << build_tree(stack, count, frame_delegates)
-          end
-          [type, root.first]
+          stacks.map { |_, count, stack|
+            build_tree(stack, count, frame_delegates)
+          }.uniq.first
         end
       end
 
@@ -140,8 +136,7 @@ module ObjectSpace
       class Stack < DelegateClass(IO)
         attr_reader :max_depth
 
-        def initialize output: $stdout, max_depth: 0
-          @max_depth = max_depth
+        def initialize output: $stdout
           super(output)
         end
 
@@ -152,15 +147,7 @@ module ObjectSpace
 
         private
 
-        def too_deep? depth
-          max_depth != 0 && depth > max_depth - 1
-        end
-
         def max_width frame, depth, seen
-          if too_deep? depth
-            return 0
-          end
-
           if seen.key? frame
             return 0
           end
@@ -178,13 +165,7 @@ module ObjectSpace
         end
 
         def display frame, depth, total_samples, last_stack, seen, max_width
-          return if too_deep? depth
-
-          if seen.key? frame
-            return
-          else
-            seen[frame] = true
-          end
+          seen[frame] = true
 
 
           buffer = max_width - ((depth * 4) + frame.name.length)
@@ -211,39 +192,17 @@ module ObjectSpace
           printf " " * buffer
           printf "% d % 8s", self_samples, "(%2.1f%%)" % (self_samples*100.0/total_samples)
           puts
-          callers = (frame.children || []).sort_by { |ie|
+
+          children = (frame.children || []).sort_by { |ie|
             -ie.total_samples
-          }.reject { |caller| seen[caller.id] }
+          }.reject { |frame| seen[frame] }
 
-          callers.each_with_index do |caller, i|
-            s = last_stack + [i == callers.length - 1]
-            display caller, depth + 1, total_samples, s, seen, max_width
+          children.each_with_index do |child, i|
+            s = last_stack + [i == children.length - 1]
+            display child, depth + 1, total_samples, s, seen, max_width
           end
         end
       end
-    end
-
-    class FramesCollection < DelegateClass(Array)
-      attr_reader :root
-
-      def initialize root, array
-        super(array)
-        @root = root
-        @incoming_edges = nil
-      end
-
-      def incoming_edges
-        @incoming_edges ||= each_with_object({}) do |frame, incoming_edges|
-          if frame[:edges]
-            frame[:edges].keys.each { |k| (incoming_edges[k] ||= []) << frame }
-          end
-        end
-      end
-    end
-
-    def heaviest_types_by_file_and_line
-      result = self.result
-      result.allocations_with_call_tree
     end
   end
 end
