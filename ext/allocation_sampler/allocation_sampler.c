@@ -1,82 +1,182 @@
 #include <ruby/ruby.h>
 #include <ruby/debug.h>
-#include <ruby/st.h>
-
-/*
-digraph objects {
-  node [ shape="record" ];
-
-  trace_stats_t [
-   label = "{
-   <f0> trace_stats_t * |
-   <f1> st_table * allocations
-   }"
-  ];
-
-  allocations [ label = "{ stats-&gt;allocations | st_table * (numtable) }" ];
-  file_table  [ label = "{ file_table | st_table * (strtable) }" ];
-  line_table  [ label = "{ line_table | st_table * (numtable) }" ];
-  class_name  [ label = "VALUE class_name" ];
-  filename    [ label = "char * filename" ];
-  line_number [ label = "unsigned long line_number" ];
-  count       [ label = "unsigned long count" ];
-
-  trace_stats_t:f1 -> allocations;
-  allocations -> class_name  [ label = "key" ];
-  allocations -> file_table  [ label = "value" ];
-  file_table  -> filename    [ label = "key" ];
-  file_table  -> line_table  [ label = "value" ];
-  line_table  -> line_number [ label = "key" ];
-  line_table  -> count       [ label = "value" ];
-}
-*/
+#include <stdlib.h>
 
 typedef struct {
-    st_table * allocations;
+    char   frames;
+    size_t capa;
+    size_t next_free;
+    size_t prev_free;
+    size_t record_count;
+    union {
+	VALUE *frames;
+	int *lines;
+    } as;
+} sample_buffer_t;
+
+typedef struct {
     size_t interval;
     size_t allocation_count;
+    size_t overall_samples;
+    sample_buffer_t * stack_samples;
+    sample_buffer_t * lines_samples;
     VALUE newobj_hook;
 } trace_stats_t;
 
-static int
-free_line_tables_i(st_data_t path, st_data_t line_table, st_data_t ctx)
+typedef struct {
+    sample_buffer_t * frames;
+    sample_buffer_t * lines;
+} compare_data_t;
+
+static void
+free_sample_buffer(sample_buffer_t *buffer)
 {
-    /* line table only contains long => long, so nothing to free */
-    st_free_table((st_table *)line_table);
-    xfree((char *)path);
-    return ST_CONTINUE;
+    if (buffer->frames) {
+	xfree(buffer->as.lines);
+    } else {
+	xfree(buffer->as.frames);
+    }
+    xfree(buffer);
 }
 
-static int
-free_path_tables_i(st_data_t classpath, st_data_t path_table, st_data_t ctx)
+static sample_buffer_t *
+alloc_lines_buffer(size_t size)
 {
-    st_foreach((st_table *)path_table, free_line_tables_i, ctx);
-    st_free_table((st_table *)path_table);
-    return ST_CONTINUE;
+    sample_buffer_t * samples = xcalloc(sizeof(sample_buffer_t), 1);
+    samples->as.lines = xcalloc(sizeof(int), size);
+    samples->capa = size;
+    samples->frames = 0;
+    return samples;
+}
+
+static sample_buffer_t *
+alloc_frames_buffer(size_t size)
+{
+    sample_buffer_t * samples = xcalloc(sizeof(sample_buffer_t), 1);
+    samples->as.frames = xcalloc(sizeof(VALUE), size);
+    samples->capa = size;
+    samples->frames = 1;
+    return samples;
+}
+
+static void
+ensure_sample_buffer_capa(sample_buffer_t * buffer, size_t size)
+{
+    /* If we can't fit all the samples in the buffer, double the buffer size. */
+    while (buffer->capa <= (buffer->next_free - 1) + (size + 2)) {
+	buffer->capa *= 2;
+	if (buffer->frames) {
+	    buffer->as.frames = xrealloc(buffer->as.frames, sizeof(VALUE) * buffer->capa);
+	} else {
+	    buffer->as.lines = xrealloc(buffer->as.lines, sizeof(int) * buffer->capa);
+	}
+    }
 }
 
 static void
 dealloc(void *ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
-    st_foreach(stats->allocations, free_path_tables_i, (st_data_t)stats);
-    st_free_table(stats->allocations);
+    sample_buffer_t * frames;
+    sample_buffer_t * lines;
+
+    frames = stats->stack_samples;
+    lines = stats->lines_samples;
+
+    if (frames && lines) {
+	free_sample_buffer(frames);
+	free_sample_buffer(lines);
+    }
     xfree(stats);
 }
 
-static int
-mark_keys_i(st_data_t key, st_data_t value, void *data)
+static VALUE
+make_frame_info(VALUE *frames, int *lines)
 {
-    rb_gc_mark((VALUE)key);
-    return ST_CONTINUE;
+    size_t count, i;
+    VALUE rb_frames;
+
+    count = *frames;
+    frames++;
+    lines++;
+
+    rb_frames = rb_ary_new_capa(count);
+
+    for(i = 0; i < count; i++, frames++, lines++) {
+	VALUE line = rb_profile_frame_first_lineno(*frames);
+	if (line != INT2NUM(0)) {
+	    line = INT2NUM(*lines);
+	}
+	rb_ary_push(rb_frames, rb_ary_new3(2, rb_obj_id(*frames), line));
+    }
+
+    return rb_frames;
+}
+
+static int
+compare(void *ctx, size_t * l, size_t * r)
+{
+    compare_data_t *compare_data = (compare_data_t *)ctx;
+    sample_buffer_t *stacks = compare_data->frames;
+    sample_buffer_t *lines = compare_data->lines;
+
+    size_t left_offset = *l;
+    size_t right_offset = *r;
+
+    size_t lstack = *(stacks->as.frames + left_offset);
+    size_t rstack = *(stacks->as.frames + right_offset);
+
+    if (lstack == rstack) {
+	/* Compare the stack plus type info */
+	int stack_cmp = memcmp(stacks->as.frames + left_offset,
+		               stacks->as.frames + right_offset,
+			       (lstack + 3) * sizeof(VALUE *));
+
+	if (stack_cmp == 0) {
+	    /* If the stacks are the same, check the line numbers */
+	    int line_cmp = memcmp(lines->as.lines + left_offset + 1,
+		                  lines->as.lines + right_offset + 1,
+				  lstack * sizeof(int));
+
+	    return line_cmp;
+	} else {
+	    return stack_cmp;
+	}
+    } else {
+	if (lstack < rstack) {
+	    return -1;
+	} else {
+	    return 1;
+	}
+    }
 }
 
 static void
 mark(void * ptr)
 {
     trace_stats_t * stats = (trace_stats_t *)ptr;
+    sample_buffer_t * stacks;
+
+    stacks = stats->stack_samples;
+
+    VALUE * frame = stacks->as.frames;
+
+    while(frame < stacks->as.frames + stacks->next_free) {
+	size_t stack_size;
+	VALUE * head;
+
+	stack_size = *frame;
+	frame++; /* First element is the stack size */
+	head = frame;
+
+	for(; frame < (head + stack_size); frame++) {
+	    rb_gc_mark(*frame);
+	}
+	frame++; /* Frame info */
+	rb_gc_mark(*frame);
+	frame++; /* Next Head */
+    }
     rb_gc_mark(stats->newobj_hook);
-    st_foreach(stats->allocations, mark_keys_i, (st_data_t)stats);
 }
 
 static const rb_data_type_t trace_stats_type = {
@@ -98,6 +198,8 @@ user_class(VALUE klass, VALUE obj)
     }
 }
 
+#define BUF_SIZE 2048
+
 static void
 newobj(VALUE tpval, void *ptr)
 {
@@ -111,41 +213,51 @@ newobj(VALUE tpval, void *ptr)
 
 	if (!NIL_P(uc)) {
 	    unsigned long count;
+	    VALUE frames_buffer[BUF_SIZE];
+	    int lines_buffer[BUF_SIZE];
+	    int num;
+
 	    VALUE path = rb_tracearg_path(tparg);
 	    VALUE line = rb_tracearg_lineno(tparg);
 
 	    if (RTEST(path)) {
-		st_table * file_table;
-		st_table * line_table;
-		char * filename;
-		unsigned long fline = NUM2ULL(line);
+		sample_buffer_t * stack_samples;
+		sample_buffer_t * lines_samples;
 
-		if(!st_lookup(stats->allocations, uc, (st_data_t *)&file_table)) {
-		    file_table = st_init_strtable();
-		    line_table = st_init_numtable();
-
-		    filename = xmalloc(RSTRING_LEN(path) + 1);
-		    strncpy(filename, RSTRING_PTR(path), RSTRING_LEN(path));
-		    filename[RSTRING_LEN(path)] = 0;
-		    st_insert(stats->allocations, uc, (st_data_t)file_table);
-		    st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
-		    st_insert(line_table, fline, (unsigned long)1);
-		} else {
-		    if (!st_lookup(file_table, (st_data_t)RSTRING_PTR(path), (st_data_t *)&line_table)) {
-			line_table = st_init_numtable();
-			filename = xmalloc(RSTRING_LEN(path) + 1);
-			strncpy(filename, RSTRING_PTR(path), RSTRING_LEN(path));
-			filename[RSTRING_LEN(path)] = 0;
-			st_insert(file_table, (st_data_t)filename, (st_data_t)line_table);
-			st_insert(line_table, fline, (unsigned long)1);
-		    } else {
-			if (!st_lookup(line_table, NUM2ULL(line), &count)) {
-			    count = 0;
-			}
-			count++;
-			st_insert(line_table, NUM2ULL(line), count);
-		    }
+		int num = rb_profile_frames(0, sizeof(frames_buffer) / sizeof(VALUE), frames_buffer, lines_buffer);
+		if (!stats->stack_samples) {
+		    stats->stack_samples = alloc_frames_buffer(num * 100);
+		    stats->lines_samples = alloc_lines_buffer(num * 100);
 		}
+		stack_samples = stats->stack_samples;
+		lines_samples = stats->lines_samples;
+
+		ensure_sample_buffer_capa(stack_samples, num + 2);
+		ensure_sample_buffer_capa(lines_samples, num + 2);
+
+		stack_samples->prev_free = stack_samples->next_free;
+		lines_samples->prev_free = lines_samples->next_free;
+
+		stack_samples->as.frames[stack_samples->next_free] = (VALUE)num;
+		lines_samples->as.lines[lines_samples->next_free] = (VALUE)num;
+
+		memcpy(stack_samples->as.frames + stack_samples->next_free + 1, frames_buffer, num * sizeof(VALUE *));
+		memcpy(lines_samples->as.lines + lines_samples->next_free + 1, lines_buffer, num * sizeof(int));
+
+		/* We're not doing de-duping right now, so just set the stack count to 0xdeadbeef */
+		stack_samples->as.frames[stack_samples->next_free + num + 1] = 0xdeadbeef;
+		stack_samples->as.frames[stack_samples->next_free + num + 2] = uc;
+
+		lines_samples->as.lines[stack_samples->next_free + num + 1] = 0xdeadbeef;
+		lines_samples->as.lines[stack_samples->next_free + num + 2] = uc;
+
+		stack_samples->next_free += (num + 3);
+		lines_samples->next_free += (num + 3);
+
+		stack_samples->record_count++;
+		lines_samples->record_count++;
+
+		stats->overall_samples++;
 	    }
 	}
     }
@@ -156,10 +268,8 @@ static VALUE
 allocate(VALUE klass)
 {
     trace_stats_t * stats;
-    stats = xmalloc(sizeof(trace_stats_t));
-    stats->allocations = st_init_numtable();;
+    stats = xcalloc(sizeof(trace_stats_t), 1);
     stats->interval = 1;
-    stats->allocation_count = 0;
     stats->newobj_hook = rb_tracepoint_new(0, RUBY_INTERNAL_EVENT_NEWOBJ, newobj, stats);
 
     return TypedData_Wrap_Struct(klass, &trace_stats_type, stats);
@@ -186,43 +296,169 @@ disable(VALUE self)
 }
 
 static int
-insert_line_to_ruby_hash(st_data_t line, st_data_t count, void *data)
+sort_frames(const void *left, const void *right)
 {
-    VALUE rb_line_hash = (VALUE)data;
-    rb_hash_aset(rb_line_hash, ULL2NUM((unsigned long)line), ULL2NUM((unsigned long)count));
-    return ST_CONTINUE;
-}
-
-static int
-insert_path_to_ruby_hash(st_data_t path, st_data_t linetable, void *data)
-{
-    VALUE rb_path_hash = (VALUE)data;
-    VALUE line_hash = rb_hash_new();
-    rb_hash_aset(rb_path_hash, rb_str_new2((char *)path), line_hash);
-    st_foreach((st_table *)linetable, insert_line_to_ruby_hash, line_hash);
-    return ST_CONTINUE;
-}
-
-static int
-insert_class_to_ruby_hash(st_data_t classname, st_data_t pathtable, void *data)
-{
-    VALUE rb_hash = (VALUE)data;
-    VALUE path_hash = rb_hash_new();
-    rb_hash_aset(rb_hash, (VALUE)classname, path_hash);
-    st_foreach((st_table *)pathtable, insert_path_to_ruby_hash, path_hash);
-    return ST_CONTINUE;
+    const VALUE *vleft = (const VALUE *)left;
+    const VALUE *vright = (const VALUE *)right;
+    /* Sort so that 0 is always at the right */
+    if (*vleft == *vright) {
+	return 0;
+    } else {
+	if (*vleft == 0) {
+	    return 1;
+	} else if (*vright == 0) {
+	    return -1;
+	}
+    }
+    return *vleft - *vright;
 }
 
 static VALUE
-result(VALUE self)
+frames(VALUE self)
 {
     trace_stats_t * stats;
-    VALUE result;
+    sample_buffer_t * frame_buffer;
+    VALUE frames;
+    VALUE *samples;
+    VALUE *head;
+    VALUE rb_cFrame;
+
+    size_t buffer_size;
 
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
 
-    result = rb_hash_new();
-    st_foreach(stats->allocations, insert_class_to_ruby_hash, result);
+    frame_buffer = stats->stack_samples;
+    buffer_size = frame_buffer->next_free - 1;
+
+    samples = xcalloc(sizeof(VALUE), buffer_size);
+    memcpy(samples, frame_buffer->as.frames, buffer_size * sizeof(VALUE));
+
+    /* Clear anything that's not a frame */
+    for(head = samples; head < (samples + buffer_size); head++) {
+	size_t frame_count;
+	frame_count = *head;
+
+	*head = 0;
+	head++;              /* Skip the count */
+	head += frame_count; /* Skip the stack */
+	*head = 0;           /* Set the de-dup count to 0 */
+	head++;
+	*head = 0;           /* Set the type to 0 */
+    }
+
+    qsort(samples, buffer_size, sizeof(VALUE *), sort_frames);
+
+    frames = rb_hash_new();
+
+    rb_cFrame = rb_const_get(rb_cAllocationSampler, rb_intern("Frame"));
+
+    for(head = samples; head < (samples + buffer_size); ) {
+	if (*head == 0)
+	    break;
+
+	VALUE file;
+	VALUE frame;
+
+	file = rb_profile_frame_absolute_path(*(VALUE *)head);
+	if (NIL_P(file))
+	    file = rb_profile_frame_path(*head);
+
+	VALUE args[3];
+
+	args[0] = rb_obj_id(*head);
+	args[1] = rb_profile_frame_full_label(*head);
+	args[2] = file;
+
+	frame = rb_class_new_instance(3, args, rb_cFrame);
+
+	rb_hash_aset(frames, rb_obj_id(*head), frame);
+
+	/* Skip duplicates */
+	VALUE *cmp;
+	for (cmp = head + 1; cmp < (samples + buffer_size); cmp++) {
+	    if (*cmp != *head) {
+		break;
+	    }
+	}
+	head = cmp;
+    }
+
+    xfree(samples);
+
+    return frames;
+}
+
+static VALUE
+samples(VALUE self)
+{
+    trace_stats_t * stats;
+    sample_buffer_t * frames;
+    sample_buffer_t * lines;
+    size_t *record_offsets;
+    VALUE result = Qnil;
+
+    TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
+
+    frames = stats->stack_samples;
+    lines = stats->lines_samples;
+
+    if (frames && lines) {
+	size_t i, j;
+	size_t * head;
+	VALUE * frame = frames->as.frames;
+	compare_data_t compare_ctx;
+	compare_ctx.frames = frames;
+	compare_ctx.lines = lines;
+
+	record_offsets = xcalloc(sizeof(size_t), frames->record_count);
+	head = record_offsets;
+
+	i = 0;
+	while(frame < frames->as.frames + frames->next_free) {
+	    *head = i;             /* Store the frame start offset */
+	    head++;                /* Move to the next entry in record_offsets */
+	    i     += (*frame + 3); /* Increase the offset */
+	    frame += (*frame + 3); /* Move to the next frame */
+	}
+
+	qsort_r(record_offsets, frames->record_count, sizeof(size_t), &compare_ctx, compare);
+
+	VALUE unique_frames = rb_ary_new();
+
+	for(i = 0; i < frames->record_count; ) {
+	    size_t current = record_offsets[i];
+	    size_t count = 0;
+
+	    /* Count any duplicate stacks ahead of us in the array */
+	    for (j = i+1; j < frames->record_count; j++) {
+		size_t next = record_offsets[j];
+		int same = compare(&compare_ctx, &current, &next);
+
+		if (same == 0) {
+		    count++;
+		} else {
+		    break;
+		}
+	    }
+
+	    i = j;
+
+	    size_t stack_size = *(frames->as.frames + current);
+
+	    VALUE type = *(frames->as.frames + current + stack_size + 2);
+
+	    rb_ary_push(unique_frames,
+		    rb_ary_new3(3,
+			type,
+			INT2NUM(count + 1),
+			make_frame_info(frames->as.frames + current, lines->as.lines + current)));
+
+	}
+
+	xfree(record_offsets);
+
+	result = unique_frames;
+    }
 
     return result;
 }
@@ -265,16 +501,27 @@ allocation_count(VALUE self)
     return INT2NUM(stats->allocation_count);
 }
 
+static VALUE
+overall_samples(VALUE self)
+{
+    trace_stats_t * stats;
+    TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
+    return INT2NUM(stats->overall_samples);
+}
+
 void
 Init_allocation_sampler(void)
 {
     VALUE rb_mObjSpace = rb_const_get(rb_cObject, rb_intern("ObjectSpace"));
+
     rb_cAllocationSampler = rb_define_class_under(rb_mObjSpace, "AllocationSampler", rb_cObject);
     rb_define_alloc_func(rb_cAllocationSampler, allocate);
     rb_define_method(rb_cAllocationSampler, "initialize", initialize, -1);
     rb_define_method(rb_cAllocationSampler, "enable", enable, 0);
     rb_define_method(rb_cAllocationSampler, "disable", disable, 0);
-    rb_define_method(rb_cAllocationSampler, "result", result, 0);
+    rb_define_method(rb_cAllocationSampler, "frames", frames, 0);
+    rb_define_method(rb_cAllocationSampler, "samples", samples, 0);
     rb_define_method(rb_cAllocationSampler, "interval", interval, 0);
     rb_define_method(rb_cAllocationSampler, "allocation_count", allocation_count, 0);
+    rb_define_method(rb_cAllocationSampler, "overall_samples", overall_samples, 0);
 }

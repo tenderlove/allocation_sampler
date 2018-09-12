@@ -4,7 +4,6 @@ require 'rubygems'
 require 'hoe'
 require 'rake/extensiontask'
 
-Hoe.plugins.delete :rubyforge
 Hoe.plugin :minitest
 Hoe.plugin :gemspec # `gem install hoe-gemspec`
 Hoe.plugin :git     # `gem install hoe-git`
@@ -21,5 +20,7 @@ HOE = Hoe.spec 'allocation_sampler' do
 end
 
 Rake::ExtensionTask.new("allocation_sampler", HOE.spec)
+
+task :default => [:compile, :test]
 
 # vim: syntax=ruby
