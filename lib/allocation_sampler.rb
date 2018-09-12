@@ -29,7 +29,7 @@ module ObjectSpace
           @line = line
           @samples = samples
           @total_samples = 0
-          @children = []
+          @children = Set.new
         end
 
         def each
@@ -63,6 +63,8 @@ module ObjectSpace
           }.join
         end
       end
+
+      attr_reader :samples, :frames
 
       def initialize samples, frames
         @samples = samples.sort_by! { |s| s[1] }.reverse!
