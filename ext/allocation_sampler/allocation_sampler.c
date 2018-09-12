@@ -1,36 +1,6 @@
 #include <ruby/ruby.h>
 #include <ruby/debug.h>
-#include <ruby/st.h>
 #include <stdlib.h>
-
-/*
-digraph objects {
-  node [ shape="record" ];
-
-  trace_stats_t [
-   label = "{
-   <f0> trace_stats_t * |
-   <f1> st_table * allocations
-   }"
-  ];
-
-  allocations [ label = "{ stats-&gt;allocations | st_table * (numtable) }" ];
-  file_table  [ label = "{ file_table | st_table * (strtable) }" ];
-  line_table  [ label = "{ line_table | st_table * (numtable) }" ];
-  class_name  [ label = "VALUE class_name" ];
-  filename    [ label = "char * filename" ];
-  line_number [ label = "unsigned long line_number" ];
-  count       [ label = "unsigned long count" ];
-
-  trace_stats_t:f1 -> allocations;
-  allocations -> class_name  [ label = "key" ];
-  allocations -> file_table  [ label = "value" ];
-  file_table  -> filename    [ label = "key" ];
-  file_table  -> line_table  [ label = "value" ];
-  line_table  -> line_number [ label = "key" ];
-  line_table  -> count       [ label = "value" ];
-}
-*/
 
 typedef struct {
     char   frames;
@@ -45,7 +15,6 @@ typedef struct {
 } sample_buffer_t;
 
 typedef struct {
-    st_table * allocations;
     size_t interval;
     size_t allocation_count;
     size_t overall_samples;
@@ -137,9 +106,6 @@ make_frame_info(VALUE *frames, int *lines)
 	VALUE line = rb_profile_frame_first_lineno(*frames);
 	if (line != INT2NUM(0)) {
 	    line = INT2NUM(*lines);
-	}
-	if (NUM2INT(line) > 10000) {
-	    printf("wtf\n");
 	}
 	rb_ary_push(rb_frames, rb_ary_new3(2, rb_obj_id(*frames), line));
     }
@@ -303,7 +269,6 @@ allocate(VALUE klass)
 {
     trace_stats_t * stats;
     stats = xcalloc(sizeof(trace_stats_t), 1);
-    stats->allocations = st_init_numtable();;
     stats->interval = 1;
     stats->newobj_hook = rb_tracepoint_new(0, RUBY_INTERNAL_EVENT_NEWOBJ, newobj, stats);
 
