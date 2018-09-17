@@ -103,10 +103,7 @@ make_frame_info(VALUE *frames, int *lines)
     rb_frames = rb_ary_new_capa(count);
 
     for(i = 0; i < count; i++, frames++, lines++) {
-	VALUE line = rb_profile_frame_first_lineno(*frames);
-	if (line != INT2NUM(0)) {
-	    line = INT2NUM(*lines);
-	}
+	VALUE line = INT2NUM(*lines);
 	rb_ary_push(rb_frames, rb_ary_new3(2, rb_obj_id(*frames), line));
     }
 
