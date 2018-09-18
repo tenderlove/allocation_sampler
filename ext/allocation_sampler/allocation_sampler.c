@@ -156,24 +156,29 @@ mark(void * ptr)
 
     stacks = stats->stack_samples;
 
-    VALUE * frame = stacks->as.frames;
+    if (stacks) {
+	VALUE * frame = stacks->as.frames;
 
-    while(frame < stacks->as.frames + stacks->next_free) {
-	size_t stack_size;
-	VALUE * head;
+	while(frame < stacks->as.frames + stacks->next_free) {
+	    size_t stack_size;
+	    VALUE * head;
 
-	stack_size = *frame;
-	frame++; /* First element is the stack size */
-	head = frame;
+	    stack_size = *frame;
+	    frame++; /* First element is the stack size */
+	    head = frame;
 
-	for(; frame < (head + stack_size); frame++) {
+	    for(; frame < (head + stack_size); frame++) {
+		rb_gc_mark(*frame);
+	    }
+	    frame++; /* Frame info */
 	    rb_gc_mark(*frame);
+	    frame++; /* Next Head */
 	}
-	frame++; /* Frame info */
-	rb_gc_mark(*frame);
-	frame++; /* Next Head */
     }
-    rb_gc_mark(stats->newobj_hook);
+
+    if (stats->newobj_hook) {
+	rb_gc_mark(stats->newobj_hook);
+    }
 }
 
 static const rb_data_type_t trace_stats_type = {
