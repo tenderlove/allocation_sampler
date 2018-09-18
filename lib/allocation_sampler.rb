@@ -40,7 +40,7 @@ module ObjectSpace
             next if seen[node]
             seen[node] = true
             yield node
-            stack.concat node.children
+            stack.concat node.children.to_a
           end
         end
 
@@ -197,7 +197,7 @@ module ObjectSpace
 
           children = (frame.children || []).sort_by { |ie|
             -ie.total_samples
-          }.reject { |frame| seen[frame] }
+          }.reject { |f| seen[f] }
 
           children.each_with_index do |child, i|
             s = last_stack + [i == children.length - 1]

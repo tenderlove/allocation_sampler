@@ -325,6 +325,11 @@ frames(VALUE self)
     TypedData_Get_Struct(self, trace_stats_t, &trace_stats_type, stats);
 
     frame_buffer = stats->stack_samples;
+
+    if (!frame_buffer) {
+	return Qnil;
+    }
+
     buffer_size = frame_buffer->next_free - 1;
 
     samples = xcalloc(sizeof(VALUE), buffer_size);
