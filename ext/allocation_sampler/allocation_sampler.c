@@ -333,13 +333,13 @@ frames(VALUE self)
 	return Qnil;
     }
 
-    buffer_size = frame_buffer->next_free - 1;
+    buffer_size = frame_buffer->next_free;
 
     samples = xcalloc(sizeof(VALUE), buffer_size);
     memcpy(samples, frame_buffer->as.frames, buffer_size * sizeof(VALUE));
 
     /* Clear anything that's not a frame */
-    for(head = samples; head < (samples + buffer_size); head++) {
+    for(head = samples; head < (samples + buffer_size - 1); head++) {
 	size_t frame_count;
 	frame_count = *head;
 
