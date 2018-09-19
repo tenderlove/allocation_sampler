@@ -1,6 +1,7 @@
 #include <ruby/ruby.h>
 #include <ruby/debug.h>
 #include <stdlib.h>
+#include "sort_r.h"
 
 typedef struct {
     char   frames;
@@ -111,14 +112,14 @@ make_frame_info(VALUE *frames, int *lines)
 }
 
 static int
-compare(void *ctx, size_t * l, size_t * r)
+compare(const void* l, const void* r, void* ctx)
 {
     compare_data_t *compare_data = (compare_data_t *)ctx;
     sample_buffer_t *stacks = compare_data->frames;
     sample_buffer_t *lines = compare_data->lines;
 
-    size_t left_offset = *l;
-    size_t right_offset = *r;
+    size_t left_offset = *(const size_t*)l;
+    size_t right_offset = *(const size_t*)r;
 
     size_t lstack = *(stacks->as.frames + left_offset);
     size_t rstack = *(stacks->as.frames + right_offset);
@@ -214,13 +215,10 @@ newobj(VALUE tpval, void *ptr)
 	VALUE uc = user_class(klass, obj);
 
 	if (!NIL_P(uc)) {
-	    unsigned long count;
 	    VALUE frames_buffer[BUF_SIZE];
 	    int lines_buffer[BUF_SIZE];
-	    int num;
 
 	    VALUE path = rb_tracearg_path(tparg);
-	    VALUE line = rb_tracearg_lineno(tparg);
 
 	    if (RTEST(path)) {
 		sample_buffer_t * stack_samples;
@@ -335,13 +333,13 @@ frames(VALUE self)
 	return Qnil;
     }
 
-    buffer_size = frame_buffer->next_free - 1;
+    buffer_size = frame_buffer->next_free;
 
     samples = xcalloc(sizeof(VALUE), buffer_size);
     memcpy(samples, frame_buffer->as.frames, buffer_size * sizeof(VALUE));
 
     /* Clear anything that's not a frame */
-    for(head = samples; head < (samples + buffer_size); head++) {
+    for(head = samples; head < (samples + buffer_size - 1); head++) {
 	size_t frame_count;
 	frame_count = *head;
 
@@ -428,7 +426,7 @@ samples(VALUE self)
 	    frame += (*frame + 3); /* Move to the next frame */
 	}
 
-	qsort_r(record_offsets, frames->record_count, sizeof(size_t), &compare_ctx, compare);
+	sort_r(record_offsets, frames->record_count, sizeof(size_t), compare, &compare_ctx);
 
 	VALUE unique_frames = rb_ary_new();
 
@@ -439,7 +437,7 @@ samples(VALUE self)
 	    /* Count any duplicate stacks ahead of us in the array */
 	    for (j = i+1; j < frames->record_count; j++) {
 		size_t next = record_offsets[j];
-		int same = compare(&compare_ctx, &current, &next);
+		int same = compare(&current, &next, &compare_ctx);
 
 		if (same == 0) {
 		    count++;
