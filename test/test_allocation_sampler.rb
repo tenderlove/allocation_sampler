@@ -162,6 +162,14 @@ TestAllocationSampler#test_stack_trace  0   (0.0%)
     File.write 'out.dot', as.result.calltree.to_dot
   end
 
+  # https://bugs.ruby-lang.org/issues/14834
+  def test_no_crash_on_ifunc
+    as = ObjectSpace::AllocationSampler.new
+    as.enable
+    [123].group_by {}
+    as.disable
+  end
+
   private
 
   def filter result
