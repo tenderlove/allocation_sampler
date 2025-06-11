@@ -1,3 +1,4 @@
+require 'allocation_sampler/version'
 require 'allocation_sampler.so'
 require 'delegate'
 require 'set'

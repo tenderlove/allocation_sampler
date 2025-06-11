@@ -1,7 +1,7 @@
 source 'https://rubygems.org'
 
-gem 'hoe'
-gem 'hoe-gemspec'
+gemspec
+
 gem 'rake'
 gem 'rake-compiler'
 gem 'minitest'
