@@ -1,26 +1,14 @@
-# -*- ruby -*-
+# frozen_string_literal: true
+require "bundler/gem_tasks"
+require "rake/testtask"
+require "rake/extensiontask"
 
-require 'rubygems'
-require 'hoe'
-require 'rake/extensiontask'
-
-Hoe.plugin :minitest
-Hoe.plugin :gemspec # `gem install hoe-gemspec`
-Hoe.plugin :git     # `gem install hoe-git`
-
-HOE = Hoe.spec 'allocation_sampler' do
-  developer('Aaron Patterson', 'aaron@tenderlovemaking.com')
-  self.readme_file   = 'README.md'
-  self.history_file  = 'CHANGELOG.md'
-  self.extra_rdoc_files  = FileList['*.md']
-  self.license 'MIT'
-  self.spec_extras = {
-    :extensions => ["ext/allocation_sampler/extconf.rb"],
-  }
+Rake::TestTask.new(:test) do |t|
+  t.libs << "test"
+  t.libs << "lib"
+  t.test_files = FileList["test/**/test_*.rb"]
 end
 
-Rake::ExtensionTask.new("allocation_sampler", HOE.spec)
+Rake::ExtensionTask.new("allocation_sampler")
 
-task :default => [:compile, :test]
-
-# vim: syntax=ruby
+task default: %i(compile test)
