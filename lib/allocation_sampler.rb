@@ -6,7 +6,6 @@ require 'cgi/escape'
 
 module ObjectSpace
   class AllocationSampler
-    VERSION = '1.0.0'
 
     class Frame
       attr_reader :id, :name, :path, :children
