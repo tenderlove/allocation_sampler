@@ -105,7 +105,7 @@ make_frame_info(VALUE *frames, int *lines)
 
     for(i = 0; i < count; i++, frames++, lines++) {
 	VALUE line = INT2NUM(*lines);
-	rb_ary_push(rb_frames, rb_ary_new3(2, rb_obj_id(*frames), line));
+	rb_ary_push(rb_frames, rb_ary_new3(2, ULL2NUM(*frames), line));
     }
 
     return rb_frames;
@@ -370,13 +370,13 @@ frames(VALUE self)
 
 	VALUE args[3];
 
-	args[0] = rb_obj_id(*head);
+	args[0] = ULL2NUM(*head);
 	args[1] = rb_profile_frame_full_label(*head);
 	args[2] = file;
 
 	frame = rb_class_new_instance(3, args, rb_cFrame);
 
-	rb_hash_aset(frames, rb_obj_id(*head), frame);
+	rb_hash_aset(frames, ULL2NUM(*head), frame);
 
 	/* Skip duplicates */
 	VALUE *cmp;
